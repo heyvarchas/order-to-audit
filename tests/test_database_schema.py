@@ -66,12 +66,19 @@ EXPECTED_TRIGGERS = {
     "trg_stock_ledger_no_update",
     "trg_stock_ledger_no_delete",
     "trg_stock_ledger_validate_source_doc",
+    "trg_stock_ledger_validate_purchase_receipt",
     "trg_stock_ledger_validate_reversal",
     "trg_stock_ledger_no_negative_balance",
     "trg_stock_adjustments_no_delete_if_referenced",
     "trg_purchases_no_delete_if_referenced",
     "trg_production_runs_no_delete_if_referenced",
     "trg_dispatches_no_delete_if_referenced",
+    "trg_purchase_items_insert_draft_only",
+    "trg_purchase_items_update_draft_only",
+    "trg_purchase_items_delete_draft_only",
+    "trg_purchases_insert_draft_only",
+    "trg_purchases_no_delete_non_draft",
+    "trg_purchases_lifecycle_and_immutability",
     "trg_invoice_items_insert_draft_only",
     "trg_invoice_items_update_draft_only",
     "trg_invoice_items_delete_draft_only",
@@ -82,6 +89,7 @@ EXPECTED_TRIGGERS = {
 EXPECTED_PARTIAL_UNIQUE_INDEXES = {
     "uq_stock_ledger_single_reversal",
     "uq_stock_ledger_prod_posting",
+    "uq_stock_ledger_purchase_posting",
     "uq_invoices_fy_type_seq",
     "uq_invoices_fy_type_num",
     "uq_invoices_number",
@@ -580,6 +588,22 @@ def test_ledger_reversal_must_exactly_negate_and_match_direction(db_session):
     db_session.add(purchase)
     db_session.flush()
 
+    purchase_line = PurchaseItem(
+        purchase_id=purchase.id,
+        item_id=data["flour"].id,
+        entered_unit_id=data["kg"].id,
+        entered_qty_milli=60000,
+        qty_stock_milli=60000,
+        unit_rate_paise=4500,
+        taxable_value_paise=270000,
+        line_total_paise=270000,
+    )
+    db_session.add(purchase_line)
+    db_session.flush()
+
+    purchase.status = "posted"
+    db_session.flush()
+
     receipt = StockLedger(
         item_id=data["flour"].id,
         movement_date=date(2026, 11, 23),
@@ -1068,6 +1092,7 @@ def test_purchase_optional_gst_defaults_to_zero(db_session):
     db_session.add(item)
     db_session.commit()
 
+    assert purchase.status == "draft"
     assert purchase.gst_type == "none"
     assert purchase.cgst_paise == 0
     assert purchase.sgst_paise == 0
@@ -1076,6 +1101,1099 @@ def test_purchase_optional_gst_defaults_to_zero(db_session):
     assert item.cgst_paise == 0
     assert item.sgst_paise == 0
     assert item.igst_paise == 0
+
+    purchase.status = "posted"
+    db_session.commit()
+    assert purchase.status == "posted"
+
+
+# ---------------------------------------------------------------------------
+# 7. Purchase Lifecycle, Line Uniqueness, GST Consistency & Immutability
+# ---------------------------------------------------------------------------
+
+
+def _make_draft_purchase_with_line(
+    session,
+    data,
+    *,
+    number="PUR/2026-27/0001",
+    item_key="flour",
+    unit_key="kg",
+    entered_qty_milli=60000,
+    qty_stock_milli=60000,
+    unit_rate_paise=4500,
+    taxable_value_paise=270000,
+    gst_type="none",
+    gst_rate_bps=0,
+    cgst_paise=0,
+    sgst_paise=0,
+    igst_paise=0,
+):
+    line_total = taxable_value_paise + cgst_paise + sgst_paise + igst_paise
+    purchase = Purchase(
+        purchase_number=number,
+        supplier_id=data["supplier"].id,
+        purchase_date=date(2026, 11, 23),
+        gst_type=gst_type,
+        subtotal_paise=taxable_value_paise,
+        cgst_paise=cgst_paise,
+        sgst_paise=sgst_paise,
+        igst_paise=igst_paise,
+        total_paise=line_total,
+        created_by=data["user"].id,
+    )
+    session.add(purchase)
+    session.flush()
+
+    line = PurchaseItem(
+        purchase_id=purchase.id,
+        item_id=data[item_key].id,
+        entered_unit_id=data[unit_key].id,
+        entered_qty_milli=entered_qty_milli,
+        qty_stock_milli=qty_stock_milli,
+        unit_rate_paise=unit_rate_paise,
+        taxable_value_paise=taxable_value_paise,
+        gst_rate_bps=gst_rate_bps,
+        cgst_paise=cgst_paise,
+        sgst_paise=sgst_paise,
+        igst_paise=igst_paise,
+        line_total_paise=line_total,
+    )
+    session.add(line)
+    session.commit()
+    return purchase, line
+
+
+def test_purchase_must_start_in_draft_and_enforces_unique_item_per_purchase(db_session):
+    data = _make_base_records(db_session)
+
+    # Direct insert with status='posted' or 'cancelled' must be rejected.
+    for forbidden_status in ("posted", "cancelled"):
+        bad_purchase = Purchase(
+            purchase_number=f"PUR-BAD-{forbidden_status.upper()}",
+            supplier_id=data["supplier"].id,
+            purchase_date=date(2026, 11, 23),
+            status=forbidden_status,
+            created_by=data["user"].id,
+        )
+        db_session.add(bad_purchase)
+        with pytest.raises(IntegrityError, match="New purchases must start in draft status"):
+            db_session.commit()
+        db_session.rollback()
+
+    # Default status is 'draft', and all three item types are allowed on a purchase.
+    purchase, _flour_line = _make_draft_purchase_with_line(
+        db_session, data, number="PUR/2026-27/0010"
+    )
+    assert purchase.status == "draft"
+
+    pouch_line = PurchaseItem(
+        purchase_id=purchase.id,
+        item_id=data["pouch"].id,
+        entered_unit_id=data["piece"].id,
+        entered_qty_milli=100000,
+        qty_stock_milli=100000,
+        unit_rate_paise=250,
+        taxable_value_paise=25000,
+        line_total_paise=25000,
+    )
+    fg_line = PurchaseItem(
+        purchase_id=purchase.id,
+        item_id=data["murukku"].id,
+        entered_unit_id=data["pkt"].id,
+        entered_qty_milli=20000,
+        qty_stock_milli=20000,
+        unit_rate_paise=3000,
+        taxable_value_paise=60000,
+        line_total_paise=60000,
+    )
+    db_session.add_all([pouch_line, fg_line])
+    db_session.commit()
+    assert len(purchase.items) == 3
+
+    # Duplicate item_id within the same purchase must be rejected.
+    dup_line = PurchaseItem(
+        purchase_id=purchase.id,
+        item_id=data["flour"].id,
+        entered_unit_id=data["kg"].id,
+        entered_qty_milli=10000,
+        qty_stock_milli=10000,
+        unit_rate_paise=4600,
+        taxable_value_paise=46000,
+        line_total_paise=46000,
+    )
+    db_session.add(dup_line)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_purchase_lines_editable_and_deletable_only_in_draft_and_draft_cancel_locks(db_session):
+    data = _make_base_records(db_session)
+    purchase, line = _make_draft_purchase_with_line(db_session, data, number="PUR/2026-27/0020")
+
+    # Updating and deleting a line while draft succeeds.
+    line.entered_qty_milli = 50000
+    line.qty_stock_milli = 50000
+    line.taxable_value_paise = 225000
+    line.line_total_paise = 225000
+    db_session.commit()
+
+    db_session.delete(line)
+    db_session.commit()
+
+    # Deleting a draft purchase via raw SQL CASCADE also succeeds cleanly.
+    re_added = PurchaseItem(
+        purchase_id=purchase.id,
+        item_id=data["flour"].id,
+        entered_unit_id=data["kg"].id,
+        entered_qty_milli=60000,
+        qty_stock_milli=60000,
+        unit_rate_paise=4500,
+        taxable_value_paise=270000,
+        line_total_paise=270000,
+    )
+    db_session.add(re_added)
+    db_session.commit()
+
+    purchase_id = purchase.id
+    db_session.execute(text("DELETE FROM purchases WHERE id = :pid"), {"pid": purchase_id})
+    db_session.commit()
+    db_session.expire_all()
+    assert (
+        db_session.execute(db.select(Purchase).where(Purchase.id == purchase_id)).scalar_one_or_none()
+        is None
+    )
+
+    # Cancelling a draft purchase (draft -> cancelled) succeeds without ledger rows and locks it.
+    draft_to_cancel, cancel_line = _make_draft_purchase_with_line(
+        db_session, data, number="PUR/2026-27/0021"
+    )
+    draft_to_cancel.status = "cancelled"
+    db_session.commit()
+    assert draft_to_cancel.status == "cancelled"
+
+    # Once cancelled, header and lines are immutable and cannot be deleted or transitioned.
+    draft_to_cancel.notes = "Should not edit cancelled draft"
+    with pytest.raises(
+        IntegrityError, match="Posted or cancelled purchase header fields are immutable"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    draft_to_cancel = db_session.get(Purchase, draft_to_cancel.id)
+    draft_to_cancel.status = "posted"
+    with pytest.raises(IntegrityError, match="Invalid purchase status transition"):
+        db_session.commit()
+    db_session.rollback()
+
+    draft_to_cancel = db_session.get(Purchase, draft_to_cancel.id)
+    draft_to_cancel.status = "draft"
+    with pytest.raises(IntegrityError, match="Invalid purchase status transition"):
+        db_session.commit()
+    db_session.rollback()
+
+    # Raw SQL DELETE hits trg_purchases_no_delete_non_draft; ORM delete hits line delete guard.
+    with pytest.raises(IntegrityError, match="Posted or cancelled purchases cannot be deleted"):
+        db_session.execute(
+            text("DELETE FROM purchases WHERE id = :pid"), {"pid": draft_to_cancel.id}
+        )
+    db_session.rollback()
+
+    draft_to_cancel = db_session.get(Purchase, draft_to_cancel.id)
+    db_session.delete(draft_to_cancel)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+    cancel_line = db_session.get(PurchaseItem, cancel_line.id)
+    cancel_line.unit_rate_paise = 4000
+    with pytest.raises(
+        IntegrityError,
+        match="Purchase lines cannot be updated once the purchase is posted or cancelled",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    cancel_line = db_session.get(PurchaseItem, cancel_line.id)
+    db_session.delete(cancel_line)
+    with pytest.raises(
+        IntegrityError,
+        match="Purchase lines cannot be deleted once the purchase is posted or cancelled",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    extra_line = PurchaseItem(
+        purchase_id=draft_to_cancel.id,
+        item_id=data["pouch"].id,
+        entered_unit_id=data["piece"].id,
+        entered_qty_milli=10000,
+        qty_stock_milli=10000,
+        unit_rate_paise=250,
+        taxable_value_paise=2500,
+        line_total_paise=2500,
+    )
+    db_session.add(extra_line)
+    with pytest.raises(
+        IntegrityError,
+        match="Purchase lines can only be inserted while the parent purchase is in draft status",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_invalid_purchase_posting_empty_totals_and_gst_split_are_rejected(db_session):
+    data = _make_base_records(db_session)
+
+    # 1. Posting a purchase with zero lines must fail.
+    empty_purchase = Purchase(
+        purchase_number="PUR/2026-27/0030",
+        supplier_id=data["supplier"].id,
+        purchase_date=date(2026, 11, 23),
+        created_by=data["user"].id,
+    )
+    db_session.add(empty_purchase)
+    db_session.commit()
+
+    empty_purchase.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Cannot post a purchase without at least one line item"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 2. Posting when header totals do not match line sums must fail.
+    bad_tot, _line = _make_draft_purchase_with_line(
+        db_session, data, number="PUR/2026-27/0031"
+    )
+    bad_tot.subtotal_paise = 260000
+    bad_tot.total_paise = 260000
+    bad_tot.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase header totals do not match sum of purchase lines"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 3. gst_type='none' with non-zero line gst_rate_bps must fail on posting.
+    bad_none, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0032",
+        gst_type="none",
+        gst_rate_bps=500,
+    )
+    bad_none.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 4. gst_type='intra_state' with IGST on a line must fail on posting.
+    bad_intra = Purchase(
+        purchase_number="PUR/2026-27/0033",
+        supplier_id=data["supplier"].id,
+        purchase_date=date(2026, 11, 23),
+        gst_type="intra_state",
+        subtotal_paise=100000,
+        cgst_paise=2500,
+        sgst_paise=2500,
+        igst_paise=0,
+        total_paise=105000,
+        created_by=data["user"].id,
+    )
+    db_session.add(bad_intra)
+    db_session.flush()
+    db_session.add(
+        PurchaseItem(
+            purchase_id=bad_intra.id,
+            item_id=data["murukku"].id,
+            entered_unit_id=data["pkt"].id,
+            entered_qty_milli=20000,
+            qty_stock_milli=20000,
+            unit_rate_paise=5000,
+            taxable_value_paise=100000,
+            gst_rate_bps=500,
+            cgst_paise=0,
+            sgst_paise=0,
+            igst_paise=5000,
+            line_total_paise=105000,
+        )
+    )
+    db_session.commit()
+    bad_intra.status = "posted"
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+    # Even if header totals match (e.g. intra_state with igst=0 on header, line with 0% bps + CGST),
+    # inconsistent line GST must be rejected.
+    bad_zero_rate, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0034",
+        gst_type="intra_state",
+        gst_rate_bps=0,
+        cgst_paise=1000,
+        sgst_paise=1000,
+        igst_paise=0,
+    )
+    bad_zero_rate.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 5. gst_type='inter_state' with CGST/SGST on a line (or 0% rate with IGST) must fail.
+    bad_inter_zero, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0035",
+        gst_type="inter_state",
+        gst_rate_bps=0,
+        igst_paise=5000,
+    )
+    bad_inter_zero.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 6. Valid intra_state (with mixed 0% Flour + 5% Murukku) and valid inter_state post cleanly.
+    ok_intra = Purchase(
+        purchase_number="PUR/2026-27/0036",
+        supplier_id=data["supplier"].id,
+        purchase_date=date(2026, 11, 23),
+        gst_type="intra_state",
+        subtotal_paise=370000,
+        cgst_paise=2500,
+        sgst_paise=2500,
+        igst_paise=0,
+        total_paise=375000,
+        created_by=data["user"].id,
+    )
+    db_session.add(ok_intra)
+    db_session.flush()
+    db_session.add_all(
+        [
+            PurchaseItem(
+                purchase_id=ok_intra.id,
+                item_id=data["flour"].id,
+                entered_unit_id=data["kg"].id,
+                entered_qty_milli=60000,
+                qty_stock_milli=60000,
+                unit_rate_paise=4500,
+                taxable_value_paise=270000,
+                gst_rate_bps=0,
+                cgst_paise=0,
+                sgst_paise=0,
+                igst_paise=0,
+                line_total_paise=270000,
+            ),
+            PurchaseItem(
+                purchase_id=ok_intra.id,
+                item_id=data["murukku"].id,
+                entered_unit_id=data["pkt"].id,
+                entered_qty_milli=20000,
+                qty_stock_milli=20000,
+                unit_rate_paise=5000,
+                taxable_value_paise=100000,
+                gst_rate_bps=500,
+                cgst_paise=2500,
+                sgst_paise=2500,
+                igst_paise=0,
+                line_total_paise=105000,
+            ),
+        ]
+    )
+    db_session.flush()
+    ok_intra.status = "posted"
+    db_session.commit()
+    assert ok_intra.status == "posted"
+
+    ok_inter, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0037",
+        item_key="murukku",
+        unit_key="pkt",
+        entered_qty_milli=20000,
+        qty_stock_milli=20000,
+        unit_rate_paise=5000,
+        taxable_value_paise=100000,
+        gst_type="inter_state",
+        gst_rate_bps=500,
+        igst_paise=5000,
+    )
+    ok_inter.status = "posted"
+    db_session.commit()
+    assert ok_inter.status == "posted"
+
+
+def test_posted_purchase_header_and_lines_are_immutable_and_non_deletable(db_session):
+    data = _make_base_records(db_session)
+    purchase, line = _make_draft_purchase_with_line(db_session, data, number="PUR/2026-27/0040")
+    other_draft, _ = _make_draft_purchase_with_line(db_session, data, number="PUR/2026-27/0041")
+
+    purchase.status = "posted"
+    db_session.commit()
+
+    # Inserting a new line into a posted purchase is rejected.
+    db_session.add(
+        PurchaseItem(
+            purchase_id=purchase.id,
+            item_id=data["pouch"].id,
+            entered_unit_id=data["piece"].id,
+            entered_qty_milli=10000,
+            qty_stock_milli=10000,
+            unit_rate_paise=250,
+            taxable_value_paise=2500,
+            line_total_paise=2500,
+        )
+    )
+    with pytest.raises(
+        IntegrityError,
+        match="Purchase lines can only be inserted while the parent purchase is in draft status",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Updating a posted purchase line is rejected.
+    line = db_session.get(PurchaseItem, line.id)
+    line.unit_rate_paise = 4600
+    with pytest.raises(
+        IntegrityError,
+        match="Purchase lines cannot be updated once the purchase is posted or cancelled",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Moving a line to a different purchase is rejected.
+    line = db_session.get(PurchaseItem, line.id)
+    line.purchase_id = other_draft.id
+    with pytest.raises(IntegrityError, match="Purchase line cannot be moved to a different purchase"):
+        db_session.commit()
+    db_session.rollback()
+
+    # Deleting a posted purchase line is rejected.
+    line = db_session.get(PurchaseItem, line.id)
+    db_session.delete(line)
+    with pytest.raises(
+        IntegrityError,
+        match="Purchase lines cannot be deleted once the purchase is posted or cancelled",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Updating any posted header field (including notes or supplier_invoice_no) is rejected.
+    purchase = db_session.get(Purchase, purchase.id)
+    purchase.notes = "Post-hoc note edit"
+    with pytest.raises(
+        IntegrityError, match="Posted or cancelled purchase header fields are immutable"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    purchase = db_session.get(Purchase, purchase.id)
+    purchase.supplier_invoice_no = "TAMPERED-INV"
+    with pytest.raises(
+        IntegrityError, match="Posted or cancelled purchase header fields are immutable"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Reverting posted -> draft is rejected.
+    purchase = db_session.get(Purchase, purchase.id)
+    purchase.status = "draft"
+    with pytest.raises(IntegrityError, match="Invalid purchase status transition"):
+        db_session.commit()
+    db_session.rollback()
+
+    # Deleting a posted purchase is rejected both via direct SQL and ORM delete.
+    with pytest.raises(IntegrityError, match="Posted or cancelled purchases cannot be deleted"):
+        db_session.execute(text("DELETE FROM purchases WHERE id = :pid"), {"pid": purchase.id})
+    db_session.rollback()
+
+    purchase = db_session.get(Purchase, purchase.id)
+    db_session.delete(purchase)
+    with pytest.raises(
+        IntegrityError,
+        match="Purchase lines cannot be deleted once the purchase is posted or cancelled",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_purchase_receipt_ledger_validation_and_duplicate_posting_guard(db_session):
+    data = _make_base_records(db_session)
+    purchase, line = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0050",
+        item_key="murukku",
+        unit_key="pkt",
+        entered_qty_milli=20000,
+        qty_stock_milli=20000,
+        unit_rate_paise=5000,
+        taxable_value_paise=100000,
+        gst_type="intra_state",
+        gst_rate_bps=500,
+        cgst_paise=2500,
+        sgst_paise=2500,
+    )
+
+    # Receipt against a draft purchase must be rejected.
+    db_session.add(
+        StockLedger(
+            item_id=data["murukku"].id,
+            movement_date=date(2026, 11, 23),
+            movement_type="purchase_receipt",
+            source_doc_type="purchase",
+            source_doc_id=purchase.id,
+            qty_change_milli=20000,
+            unit_cost_paise=5000,
+            value_change_paise=100000,
+            created_by=data["user"].id,
+        )
+    )
+    with pytest.raises(
+        IntegrityError, match="Purchase receipt ledger entry requires a posted purchase"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Post the purchase.
+    purchase = db_session.get(Purchase, purchase.id)
+    purchase.status = "posted"
+    db_session.commit()
+
+    # Receipt for an item not on the purchase must be rejected.
+    db_session.add(
+        StockLedger(
+            item_id=data["flour"].id,
+            movement_date=date(2026, 11, 23),
+            movement_type="purchase_receipt",
+            source_doc_type="purchase",
+            source_doc_id=purchase.id,
+            qty_change_milli=20000,
+            unit_cost_paise=5000,
+            value_change_paise=100000,
+            created_by=data["user"].id,
+        )
+    )
+    with pytest.raises(
+        IntegrityError, match="Purchase receipt ledger entry must match a purchase line item"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Receipt capitalizing GST (line_total_paise = 105000 instead of taxable_value_paise = 100000)
+    # must be rejected.
+    db_session.add(
+        StockLedger(
+            item_id=data["murukku"].id,
+            movement_date=date(2026, 11, 23),
+            movement_type="purchase_receipt",
+            source_doc_type="purchase",
+            source_doc_id=purchase.id,
+            qty_change_milli=20000,
+            unit_cost_paise=5250,
+            value_change_paise=105000,
+            created_by=data["user"].id,
+        )
+    )
+    with pytest.raises(
+        IntegrityError, match="Purchase receipt ledger entry must match a purchase line item"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Valid receipt matching qty_stock_milli and taxable_value_paise (excluding GST) succeeds.
+    valid_receipt = StockLedger(
+        item_id=data["murukku"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="purchase_receipt",
+        source_doc_type="purchase",
+        source_doc_id=purchase.id,
+        qty_change_milli=line.qty_stock_milli,
+        unit_cost_paise=5000,
+        value_change_paise=line.taxable_value_paise,
+        created_by=data["user"].id,
+    )
+    db_session.add(valid_receipt)
+    db_session.commit()
+
+    # Duplicate purchase_receipt for the same purchase and item must be rejected.
+    dup_receipt = StockLedger(
+        item_id=data["murukku"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="purchase_receipt",
+        source_doc_type="purchase",
+        source_doc_id=purchase.id,
+        qty_change_milli=line.qty_stock_milli,
+        unit_cost_paise=5000,
+        value_change_paise=line.taxable_value_paise,
+        created_by=data["user"].id,
+    )
+    db_session.add(dup_receipt)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_posted_purchase_cancellation_requires_all_receipts_reversed(db_session):
+    data = _make_base_records(db_session)
+
+    # Create a 2-line draft purchase (Flour + Pouch) and post it.
+    purchase = Purchase(
+        purchase_number="PUR/2026-27/0060",
+        supplier_id=data["supplier"].id,
+        purchase_date=date(2026, 11, 23),
+        gst_type="none",
+        subtotal_paise=295000,
+        total_paise=295000,
+        created_by=data["user"].id,
+    )
+    db_session.add(purchase)
+    db_session.flush()
+    db_session.add_all(
+        [
+            PurchaseItem(
+                purchase_id=purchase.id,
+                item_id=data["flour"].id,
+                entered_unit_id=data["kg"].id,
+                entered_qty_milli=60000,
+                qty_stock_milli=60000,
+                unit_rate_paise=4500,
+                taxable_value_paise=270000,
+                line_total_paise=270000,
+            ),
+            PurchaseItem(
+                purchase_id=purchase.id,
+                item_id=data["pouch"].id,
+                entered_unit_id=data["piece"].id,
+                entered_qty_milli=100000,
+                qty_stock_milli=100000,
+                unit_rate_paise=250,
+                taxable_value_paise=25000,
+                line_total_paise=25000,
+            ),
+        ]
+    )
+    db_session.flush()
+    purchase.status = "posted"
+    db_session.commit()
+
+    # Cancelling a posted purchase before any receipts exist must fail.
+    purchase.status = "cancelled"
+    with pytest.raises(
+        IntegrityError,
+        match="Cannot cancel a posted purchase until all purchase receipt ledger entries are reversed",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Post both purchase receipts.
+    flour_receipt = StockLedger(
+        item_id=data["flour"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="purchase_receipt",
+        source_doc_type="purchase",
+        source_doc_id=purchase.id,
+        qty_change_milli=60000,
+        unit_cost_paise=4500,
+        value_change_paise=270000,
+        created_by=data["user"].id,
+    )
+    pouch_receipt = StockLedger(
+        item_id=data["pouch"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="purchase_receipt",
+        source_doc_type="purchase",
+        source_doc_id=purchase.id,
+        qty_change_milli=100000,
+        unit_cost_paise=250,
+        value_change_paise=25000,
+        created_by=data["user"].id,
+    )
+    db_session.add_all([flour_receipt, pouch_receipt])
+    db_session.commit()
+
+    # Cancelling while neither receipt is reversed must fail.
+    purchase = db_session.get(Purchase, purchase.id)
+    purchase.status = "cancelled"
+    with pytest.raises(
+        IntegrityError,
+        match="Cannot cancel a posted purchase until all purchase receipt ledger entries are reversed",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Reverse only line 1 (Flour) -> still cannot cancel because line 2 (Pouch) is unreversed.
+    db_session.add(
+        StockLedger(
+            item_id=data["flour"].id,
+            movement_date=date(2026, 11, 24),
+            movement_type="reversal_out",
+            source_doc_type="purchase",
+            source_doc_id=purchase.id,
+            reverses_ledger_id=flour_receipt.id,
+            qty_change_milli=-60000,
+            unit_cost_paise=4500,
+            value_change_paise=-270000,
+            created_by=data["user"].id,
+        )
+    )
+    db_session.commit()
+
+    purchase = db_session.get(Purchase, purchase.id)
+    purchase.status = "cancelled"
+    with pytest.raises(
+        IntegrityError,
+        match="Cannot cancel a posted purchase until all purchase receipt ledger entries are reversed",
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Reverse line 2 (Pouch) as well.
+    db_session.add(
+        StockLedger(
+            item_id=data["pouch"].id,
+            movement_date=date(2026, 11, 24),
+            movement_type="reversal_out",
+            source_doc_type="purchase",
+            source_doc_id=purchase.id,
+            reverses_ledger_id=pouch_receipt.id,
+            qty_change_milli=-100000,
+            unit_cost_paise=250,
+            value_change_paise=-25000,
+            created_by=data["user"].id,
+        )
+    )
+    db_session.commit()
+
+    # Attempting posted -> cancelled while simultaneously tampering with a header field must fail.
+    purchase = db_session.get(Purchase, purchase.id)
+    purchase.status = "cancelled"
+    purchase.notes = "Tampered during cancel"
+    with pytest.raises(
+        IntegrityError, match="Posted or cancelled purchase header fields are immutable"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # Clean posted -> cancelled now succeeds.
+    purchase = db_session.get(Purchase, purchase.id)
+    purchase.status = "cancelled"
+    db_session.commit()
+    assert purchase.status == "cancelled"
+
+    # Once cancelled, no new purchase_receipt can be inserted for this purchase.
+    db_session.add(
+        StockLedger(
+            item_id=data["murukku"].id,
+            movement_date=date(2026, 11, 24),
+            movement_type="purchase_receipt",
+            source_doc_type="purchase",
+            source_doc_id=purchase.id,
+            qty_change_milli=10000,
+            unit_cost_paise=3000,
+            value_change_paise=30000,
+            created_by=data["user"].id,
+        )
+    )
+    with pytest.raises(
+        IntegrityError, match="Purchase receipt ledger entry requires a posted purchase"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # And deleting the cancelled purchase remains blocked.
+    purchase = db_session.get(Purchase, purchase.id)
+    db_session.delete(purchase)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_purchase_posting_rejects_incorrect_intra_and_inter_state_gst_amounts(db_session):
+    data = _make_base_records(db_session)
+
+    # 1. Intra-state: off-by-one CGST (2499 instead of 2500 on 5% of ₹1,000) must fail.
+    bad_cgst, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0070",
+        item_key="murukku",
+        unit_key="pkt",
+        entered_qty_milli=20000,
+        qty_stock_milli=20000,
+        unit_rate_paise=5000,
+        taxable_value_paise=100000,
+        gst_type="intra_state",
+        gst_rate_bps=500,
+        cgst_paise=2499,
+        sgst_paise=2500,
+    )
+    bad_cgst.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 2. Intra-state: off-by-one SGST (2501 instead of 2500) must fail.
+    bad_sgst, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0071",
+        item_key="murukku",
+        unit_key="pkt",
+        entered_qty_milli=20000,
+        qty_stock_milli=20000,
+        unit_rate_paise=5000,
+        taxable_value_paise=100000,
+        gst_type="intra_state",
+        gst_rate_bps=500,
+        cgst_paise=2500,
+        sgst_paise=2501,
+    )
+    bad_sgst.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 3. Intra-state: half-even (2 instead of half-up 3 for 2.5 paise: 100 * 500 / 20000) must fail.
+    bad_intra_half, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0072",
+        item_key="pouch",
+        unit_key="piece",
+        entered_qty_milli=1000,
+        qty_stock_milli=1000,
+        unit_rate_paise=100,
+        taxable_value_paise=100,
+        gst_type="intra_state",
+        gst_rate_bps=500,
+        cgst_paise=2,
+        sgst_paise=2,
+    )
+    bad_intra_half.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 4. Intra-state: zero taxes on taxable 5% line must fail.
+    bad_intra_zero_tax, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0073",
+        item_key="murukku",
+        unit_key="pkt",
+        entered_qty_milli=20000,
+        qty_stock_milli=20000,
+        unit_rate_paise=5000,
+        taxable_value_paise=100000,
+        gst_type="intra_state",
+        gst_rate_bps=500,
+        cgst_paise=0,
+        sgst_paise=0,
+    )
+    bad_intra_zero_tax.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+    # 5. Inter-state: off-by-one IGST (4999 and 5001 instead of 5000) must fail.
+    for idx, wrong_igst in enumerate((4999, 5001), start=1):
+        bad_igst, _ = _make_draft_purchase_with_line(
+            db_session,
+            data,
+            number=f"PUR/2026-27/0074-{idx}",
+            item_key="murukku",
+            unit_key="pkt",
+            entered_qty_milli=20000,
+            qty_stock_milli=20000,
+            unit_rate_paise=5000,
+            taxable_value_paise=100000,
+            gst_type="inter_state",
+            gst_rate_bps=500,
+            igst_paise=wrong_igst,
+        )
+        bad_igst.status = "posted"
+        with pytest.raises(
+            IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+        ):
+            db_session.commit()
+        db_session.rollback()
+
+    # 6. Inter-state: half-even (2 instead of half-up 3 for 2.5 paise: 50 * 500 / 10000) must fail.
+    bad_inter_half, _ = _make_draft_purchase_with_line(
+        db_session,
+        data,
+        number="PUR/2026-27/0075",
+        item_key="pouch",
+        unit_key="piece",
+        entered_qty_milli=1000,
+        qty_stock_milli=1000,
+        unit_rate_paise=50,
+        taxable_value_paise=50,
+        gst_type="inter_state",
+        gst_rate_bps=500,
+        igst_paise=2,
+    )
+    bad_inter_half.status = "posted"
+    with pytest.raises(
+        IntegrityError, match="Purchase line GST values are inconsistent with purchase gst_type"
+    ):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_purchase_posting_accepts_exact_half_up_gst_rounding_and_mixed_rate_lines(db_session):
+    data = _make_base_records(db_session)
+
+    # 1. Intra-state rounding edge cases:
+    #    - 0.5 paise (20 * 500 / 20000) -> 1 paise each
+    #    - 2.5 paise (100 * 500 / 20000) -> 3 paise each (half-up, not half-even)
+    #    - 0.475 paise (19 * 500 / 20000) -> 0 paise each
+    #    - 299.97 paise (3333 * 1800 / 20000) -> 300 paise each
+    #    - 0 taxable @ 5% -> 0 paise each
+    #    - 0% GST line with positive taxable value -> 0 paise each
+    intra_cases = [
+        ("PUR/2026-27/0080", 20, 500, 1, 1),
+        ("PUR/2026-27/0081", 100, 500, 3, 3),
+        ("PUR/2026-27/0082", 19, 500, 0, 0),
+        ("PUR/2026-27/0083", 3333, 1800, 300, 300),
+        ("PUR/2026-27/0084", 0, 500, 0, 0),
+        ("PUR/2026-27/0084B", 270000, 0, 0, 0),
+    ]
+    for number, taxable, rate_bps, expected_cgst, expected_sgst in intra_cases:
+        pur, _ = _make_draft_purchase_with_line(
+            db_session,
+            data,
+            number=number,
+            item_key="pouch",
+            unit_key="piece",
+            entered_qty_milli=1000,
+            qty_stock_milli=1000,
+            unit_rate_paise=taxable,
+            taxable_value_paise=taxable,
+            gst_type="intra_state",
+            gst_rate_bps=rate_bps,
+            cgst_paise=expected_cgst,
+            sgst_paise=expected_sgst,
+            igst_paise=0,
+        )
+        pur.status = "posted"
+        db_session.commit()
+        assert pur.status == "posted"
+
+    # 2. Inter-state rounding edge cases:
+    #    - 0.5 paise (10 * 500 / 10000) -> 1 paise
+    #    - 2.5 paise (50 * 500 / 10000) -> 3 paise (half-up, not half-even)
+    #    - 0.45 paise (9 * 500 / 10000) -> 0 paise
+    #    - 1200.60 paise (10005 * 1200 / 10000) -> 1201 paise
+    #    - 0% GST line -> 0 paise
+    inter_cases = [
+        ("PUR/2026-27/0085", 10, 500, 1),
+        ("PUR/2026-27/0086", 50, 500, 3),
+        ("PUR/2026-27/0087", 9, 500, 0),
+        ("PUR/2026-27/0088", 10005, 1200, 1201),
+        ("PUR/2026-27/0089", 270000, 0, 0),
+    ]
+    for number, taxable, rate_bps, expected_igst in inter_cases:
+        pur, _ = _make_draft_purchase_with_line(
+            db_session,
+            data,
+            number=number,
+            item_key="pouch",
+            unit_key="piece",
+            entered_qty_milli=1000,
+            qty_stock_milli=1000,
+            unit_rate_paise=taxable,
+            taxable_value_paise=taxable,
+            gst_type="inter_state",
+            gst_rate_bps=rate_bps,
+            igst_paise=expected_igst,
+        )
+        pur.status = "posted"
+        db_session.commit()
+        assert pur.status == "posted"
+
+    # 3. Mixed-rate multi-line inter-state purchase (0% Flour + 5% Murukku + 18% Pouch with rounding).
+    #    Flour:   270000 @ 0%  -> IGST = 0
+    #    Murukku:     50 @ 5%  -> IGST = round_half_up(2.5) = 3
+    #    Pouch:     3333 @ 18% -> IGST = round_half_up(599.94) = 600
+    mixed_inter = Purchase(
+        purchase_number="PUR/2026-27/0090",
+        supplier_id=data["supplier"].id,
+        purchase_date=date(2026, 11, 23),
+        gst_type="inter_state",
+        subtotal_paise=270000 + 50 + 3333,
+        cgst_paise=0,
+        sgst_paise=0,
+        igst_paise=603,
+        total_paise=270000 + 50 + 3333 + 603,
+        created_by=data["user"].id,
+    )
+    db_session.add(mixed_inter)
+    db_session.flush()
+    db_session.add_all(
+        [
+            PurchaseItem(
+                purchase_id=mixed_inter.id,
+                item_id=data["flour"].id,
+                entered_unit_id=data["kg"].id,
+                entered_qty_milli=60000,
+                qty_stock_milli=60000,
+                unit_rate_paise=4500,
+                taxable_value_paise=270000,
+                gst_rate_bps=0,
+                igst_paise=0,
+                line_total_paise=270000,
+            ),
+            PurchaseItem(
+                purchase_id=mixed_inter.id,
+                item_id=data["murukku"].id,
+                entered_unit_id=data["pkt"].id,
+                entered_qty_milli=1000,
+                qty_stock_milli=1000,
+                unit_rate_paise=50,
+                taxable_value_paise=50,
+                gst_rate_bps=500,
+                igst_paise=3,
+                line_total_paise=53,
+            ),
+            PurchaseItem(
+                purchase_id=mixed_inter.id,
+                item_id=data["pouch"].id,
+                entered_unit_id=data["piece"].id,
+                entered_qty_milli=1000,
+                qty_stock_milli=1000,
+                unit_rate_paise=3333,
+                taxable_value_paise=3333,
+                gst_rate_bps=1800,
+                igst_paise=600,
+                line_total_paise=3933,
+            ),
+        ]
+    )
+    db_session.flush()
+    mixed_inter.status = "posted"
+    db_session.commit()
+    assert mixed_inter.status == "posted"
 
 
 def test_ledger_trigger_rejects_negative_quantity_and_value(db_session):

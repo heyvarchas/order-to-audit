@@ -296,7 +296,7 @@ class Purchase(db.Model):
     sgst_paise = db.Column(db.Integer, nullable=False, default=0)
     igst_paise = db.Column(db.Integer, nullable=False, default=0)
     total_paise = db.Column(db.Integer, nullable=False, default=0)
-    status = db.Column(db.String(20), nullable=False, default="posted")
+    status = db.Column(db.String(20), nullable=False, default="draft")
     notes = db.Column(db.Text, nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
@@ -313,6 +313,11 @@ class Purchase(db.Model):
 class PurchaseItem(db.Model):
     __tablename__ = "purchase_items"
     __table_args__ = (
+        UniqueConstraint(
+            "purchase_id",
+            "item_id",
+            name="uq_purchase_items_purchase_item",
+        ),
         CheckConstraint("entered_qty_milli > 0", name="ck_purchase_items_entered_qty_pos"),
         CheckConstraint("qty_stock_milli > 0", name="ck_purchase_items_stock_qty_pos"),
         CheckConstraint("unit_rate_paise >= 0", name="ck_purchase_items_rate_nonneg"),
@@ -577,6 +582,18 @@ class StockLedger(db.Model):
             sqlite_where=text(
                 "source_doc_type = 'production_run' "
                 "AND movement_type IN ('production_issue', 'packaging_damage', 'production_output')"
+            ),
+        ),
+        Index(
+            "uq_stock_ledger_purchase_posting",
+            "source_doc_type",
+            "source_doc_id",
+            "item_id",
+            "movement_type",
+            unique=True,
+            sqlite_where=text(
+                "source_doc_type = 'purchase' "
+                "AND movement_type = 'purchase_receipt'"
             ),
         ),
     )

@@ -26,6 +26,7 @@ from app.models import (
     Item,
     ItemUnitConversion,
     Purchase,
+    PurchaseItem,
     StockAdjustment,
     StockLedger,
     Supplier,
@@ -186,16 +187,43 @@ def _seed_benchmark_master_data(db_session):
     }
 
 
-def _make_source_purchase(db_session, *, supplier_id: int, user_id: int, number: str, dt: date):
+def _make_source_purchase(
+    db_session,
+    *,
+    supplier_id: int,
+    user_id: int,
+    number: str,
+    dt: date,
+    item: Item,
+    qty_milli: int,
+    total_value_paise: int,
+):
+    unit_rate_paise = divide_round_half_up(total_value_paise * 1000, qty_milli)
     purchase = Purchase(
         purchase_number=number,
         supplier_id=supplier_id,
         purchase_date=dt,
-        subtotal_paise=0,
-        total_paise=0,
+        subtotal_paise=total_value_paise,
+        total_paise=total_value_paise,
         created_by=user_id,
     )
     db_session.add(purchase)
+    db_session.flush()
+
+    line = PurchaseItem(
+        purchase_id=purchase.id,
+        item_id=item.id,
+        entered_unit_id=item.stock_unit_id,
+        entered_qty_milli=qty_milli,
+        qty_stock_milli=qty_milli,
+        unit_rate_paise=unit_rate_paise,
+        taxable_value_paise=total_value_paise,
+        line_total_paise=total_value_paise,
+    )
+    db_session.add(line)
+    db_session.flush()
+
+    purchase.status = "posted"
     db_session.flush()
     return purchase
 
@@ -413,7 +441,14 @@ def test_receipt_issue_primitives_unrounded_wac_and_no_internal_commit(db_sessio
 
     # Receipt primitive does NOT commit internally: verify rollback discards it.
     temp_pur = _make_source_purchase(
-        db_session, supplier_id=data["supplier"].id, user_id=admin.id, number="PUR-TMP", dt=dt
+        db_session,
+        supplier_id=data["supplier"].id,
+        user_id=admin.id,
+        number="PUR-TMP",
+        dt=dt,
+        item=flour,
+        qty_milli=60_000,
+        total_value_paise=270_000,
     )
     post_stock_receipt(
         item_id=flour.id,
@@ -430,7 +465,14 @@ def test_receipt_issue_primitives_unrounded_wac_and_no_internal_commit(db_sessio
 
     # Commit benchmark purchase receipt: +60 kg @ ₹45.00 = ₹2,700.00
     pur = _make_source_purchase(
-        db_session, supplier_id=data["supplier"].id, user_id=admin.id, number="PUR-001", dt=dt
+        db_session,
+        supplier_id=data["supplier"].id,
+        user_id=admin.id,
+        number="PUR-001",
+        dt=dt,
+        item=flour,
+        qty_milli=60_000,
+        total_value_paise=270_000,
     )
     post_stock_receipt(
         item_id=flour.id,
@@ -640,6 +682,9 @@ def test_trigger_rejects_historically_negative_running_balance_even_with_zero_fi
         user_id=admin.id,
         number="PUR-LATER-QTY",
         dt=date(2026, 11, 24),
+        item=flour,
+        qty_milli=10_000,
+        total_value_paise=42_000,
     )
     post_stock_receipt(
         item_id=flour.id,
@@ -694,6 +739,9 @@ def test_trigger_rejects_historically_negative_running_balance_even_with_zero_fi
         user_id=admin.id,
         number="PUR-LATER-VAL",
         dt=date(2026, 11, 24),
+        item=oil,
+        qty_milli=10_000,
+        total_value_paise=140_000,
     )
     post_stock_receipt(
         item_id=oil.id,
@@ -840,7 +888,14 @@ def test_duplicate_opening_stock_prior_movements_and_inactive_item_rejected(db_s
 
     # 11. Opening stock rejected if item already has any previous ledger movement
     pur = _make_source_purchase(
-        db_session, supplier_id=data["supplier"].id, user_id=admin.id, number="PUR-PRIOR", dt=dt
+        db_session,
+        supplier_id=data["supplier"].id,
+        user_id=admin.id,
+        number="PUR-PRIOR",
+        dt=dt,
+        item=oil,
+        qty_milli=10_000,
+        total_value_paise=140_000,
     )
     post_stock_receipt(
         item_id=oil.id,

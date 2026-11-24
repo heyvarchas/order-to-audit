@@ -93,6 +93,31 @@ SQLITE_TRIGGER_STATEMENTS = [
           );
     END
     """,
+    # --- Stock ledger purchase receipt validation ---
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_stock_ledger_validate_purchase_receipt
+    BEFORE INSERT ON stock_ledger
+    WHEN NEW.source_doc_type = 'purchase' AND NEW.movement_type = 'purchase_receipt'
+    BEGIN
+        SELECT RAISE(ABORT, 'Purchase receipt ledger entry requires a posted purchase')
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM purchases
+            WHERE id = NEW.source_doc_id
+              AND status = 'posted'
+        );
+
+        SELECT RAISE(ABORT, 'Purchase receipt ledger entry must match a purchase line item')
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM purchase_items
+            WHERE purchase_id = NEW.source_doc_id
+              AND item_id = NEW.item_id
+              AND qty_stock_milli = NEW.qty_change_milli
+              AND taxable_value_paise = NEW.value_change_paise
+        );
+    END
+    """,
     # --- Stock ledger reversal integrity ---
     """
     CREATE TRIGGER IF NOT EXISTS trg_stock_ledger_validate_reversal
@@ -229,6 +254,185 @@ SQLITE_TRIGGER_STATEMENTS = [
             SELECT 1 FROM stock_ledger
             WHERE source_doc_type = 'dispatch' AND source_doc_id = OLD.id
         );
+    END
+    """,
+    # --- Purchase line draft-only & immutability triggers ---
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_purchase_items_insert_draft_only
+    BEFORE INSERT ON purchase_items
+    BEGIN
+        SELECT RAISE(ABORT, 'Purchase lines can only be inserted while the parent purchase is in draft status')
+        WHERE NOT EXISTS (
+            SELECT 1 FROM purchases WHERE id = NEW.purchase_id AND status = 'draft'
+        );
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_purchase_items_update_draft_only
+    BEFORE UPDATE ON purchase_items
+    BEGIN
+        SELECT RAISE(ABORT, 'Purchase line cannot be moved to a different purchase')
+        WHERE NEW.purchase_id != OLD.purchase_id;
+
+        SELECT RAISE(ABORT, 'Purchase lines cannot be updated once the purchase is posted or cancelled')
+        WHERE NOT EXISTS (
+            SELECT 1 FROM purchases WHERE id = OLD.purchase_id AND status = 'draft'
+        );
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_purchase_items_delete_draft_only
+    BEFORE DELETE ON purchase_items
+    BEGIN
+        SELECT RAISE(ABORT, 'Purchase lines cannot be deleted once the purchase is posted or cancelled')
+        WHERE EXISTS (
+            SELECT 1 FROM purchases WHERE id = OLD.purchase_id AND status != 'draft'
+        );
+    END
+    """,
+    # --- Purchase header lifecycle, posting validation & immutability triggers ---
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_purchases_insert_draft_only
+    BEFORE INSERT ON purchases
+    BEGIN
+        SELECT RAISE(ABORT, 'New purchases must start in draft status')
+        WHERE NEW.status != 'draft';
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_purchases_no_delete_non_draft
+    BEFORE DELETE ON purchases
+    WHEN OLD.status != 'draft'
+    BEGIN
+        SELECT RAISE(ABORT, 'Posted or cancelled purchases cannot be deleted');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_purchases_lifecycle_and_immutability
+    BEFORE UPDATE ON purchases
+    BEGIN
+        SELECT RAISE(ABORT, 'Invalid purchase status transition')
+        WHERE OLD.status != NEW.status
+          AND NOT (
+              (OLD.status = 'draft' AND NEW.status IN ('posted', 'cancelled'))
+              OR (OLD.status = 'posted' AND NEW.status = 'cancelled')
+          );
+
+        SELECT RAISE(ABORT, 'Posted or cancelled purchase header fields are immutable')
+        WHERE OLD.status != 'draft'
+          AND (
+              NEW.status = OLD.status
+              OR NEW.id IS NOT OLD.id
+              OR NEW.purchase_number IS NOT OLD.purchase_number
+              OR NEW.supplier_id IS NOT OLD.supplier_id
+              OR NEW.purchase_date IS NOT OLD.purchase_date
+              OR NEW.supplier_invoice_no IS NOT OLD.supplier_invoice_no
+              OR NEW.gst_type IS NOT OLD.gst_type
+              OR NEW.subtotal_paise IS NOT OLD.subtotal_paise
+              OR NEW.cgst_paise IS NOT OLD.cgst_paise
+              OR NEW.sgst_paise IS NOT OLD.sgst_paise
+              OR NEW.igst_paise IS NOT OLD.igst_paise
+              OR NEW.total_paise IS NOT OLD.total_paise
+              OR NEW.notes IS NOT OLD.notes
+              OR NEW.created_by IS NOT OLD.created_by
+              OR NEW.created_at IS NOT OLD.created_at
+          );
+
+        SELECT RAISE(ABORT, 'Cannot post a purchase without at least one line item')
+        WHERE OLD.status = 'draft'
+          AND NEW.status = 'posted'
+          AND NOT EXISTS (
+              SELECT 1 FROM purchase_items WHERE purchase_id = NEW.id
+          );
+
+        SELECT RAISE(ABORT, 'Purchase header totals do not match sum of purchase lines')
+        WHERE OLD.status = 'draft'
+          AND NEW.status = 'posted'
+          AND EXISTS (
+              SELECT 1
+              FROM (
+                  SELECT
+                      COALESCE(SUM(taxable_value_paise), 0) AS sum_taxable,
+                      COALESCE(SUM(cgst_paise), 0) AS sum_cgst,
+                      COALESCE(SUM(sgst_paise), 0) AS sum_sgst,
+                      COALESCE(SUM(igst_paise), 0) AS sum_igst,
+                      COALESCE(SUM(line_total_paise), 0) AS sum_total
+                  FROM purchase_items
+                  WHERE purchase_id = NEW.id
+              )
+              WHERE NEW.subtotal_paise != sum_taxable
+                 OR NEW.cgst_paise != sum_cgst
+                 OR NEW.sgst_paise != sum_sgst
+                 OR NEW.igst_paise != sum_igst
+                 OR NEW.total_paise != sum_total
+          );
+
+        SELECT RAISE(ABORT, 'Purchase line GST values are inconsistent with purchase gst_type')
+        WHERE OLD.status = 'draft'
+          AND NEW.status = 'posted'
+          AND EXISTS (
+              SELECT 1
+              FROM purchase_items AS pi
+              WHERE pi.purchase_id = NEW.id
+                AND (
+                    (
+                        NEW.gst_type = 'none'
+                        AND (
+                            pi.gst_rate_bps != 0
+                            OR pi.cgst_paise != 0
+                            OR pi.sgst_paise != 0
+                            OR pi.igst_paise != 0
+                        )
+                    )
+                    OR (
+                        NEW.gst_type = 'intra_state'
+                        AND (
+                            pi.igst_paise != 0
+                            OR pi.cgst_paise != ((pi.taxable_value_paise * pi.gst_rate_bps) + 10000) / 20000
+                            OR pi.sgst_paise != ((pi.taxable_value_paise * pi.gst_rate_bps) + 10000) / 20000
+                        )
+                    )
+                    OR (
+                        NEW.gst_type = 'inter_state'
+                        AND (
+                            pi.cgst_paise != 0
+                            OR pi.sgst_paise != 0
+                            OR pi.igst_paise != ((pi.taxable_value_paise * pi.gst_rate_bps) + 5000) / 10000
+                        )
+                    )
+                )
+          );
+
+        SELECT RAISE(ABORT, 'Cannot cancel a posted purchase until all purchase receipt ledger entries are reversed')
+        WHERE OLD.status = 'posted'
+          AND NEW.status = 'cancelled'
+          AND (
+              EXISTS (
+                  SELECT 1
+                  FROM purchase_items AS pi
+                  WHERE pi.purchase_id = OLD.id
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM stock_ledger AS sl
+                        WHERE sl.source_doc_type = 'purchase'
+                          AND sl.source_doc_id = OLD.id
+                          AND sl.movement_type = 'purchase_receipt'
+                          AND sl.item_id = pi.item_id
+                    )
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM stock_ledger AS sl
+                  WHERE sl.source_doc_type = 'purchase'
+                    AND sl.source_doc_id = OLD.id
+                    AND sl.movement_type = 'purchase_receipt'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM stock_ledger AS rev
+                        WHERE rev.reverses_ledger_id = sl.id
+                    )
+              )
+          );
     END
     """,
     # --- Invoice line draft-only & immutability triggers ---
