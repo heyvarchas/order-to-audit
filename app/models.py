@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from flask_login import UserMixin
 from sqlalchemy import CheckConstraint, Index, UniqueConstraint, text
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.extensions import db
 
@@ -40,6 +41,18 @@ class User(UserMixin, db.Model):
     role = db.Column(db.String(30), nullable=False)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+
+    def set_password(self, password: str) -> None:
+        """Hash and store the user's password securely (never plaintext)."""
+        if not password:
+            raise ValueError("Password must not be empty.")
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password: str) -> bool:
+        """Verify a candidate password against the stored password hash."""
+        if not password or not self.password_hash:
+            return False
+        return check_password_hash(self.password_hash, password)
 
 
 class AppSetting(db.Model):
