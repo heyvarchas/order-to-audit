@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block title %}Bills of Materials | Order-to-Audit{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h3 mb-0">Bills of Materials (BOMs)</h1>
+    {% if user_has_permission(current_user, 'manage_products_customers') %}
+        <a href="{{ url_for('boms.create_bom') }}" class="btn btn-primary btn-sm">
+            + New BOM
+        </a>
+    {% endif %}
+</div>
+
+<form method="get" class="card card-body shadow-sm mb-3">
+    <div class="row g-2 align-items-end">
+        <div class="col-12 col-sm-5 col-md-4">
+            <label for="finished_item_id" class="form-label small mb-1">Finished Product</label>
+            <select id="finished_item_id" name="finished_item_id" class="form-select form-select-sm">
+                <option value="">All Finished Products</option>
+                {% for item in finished_items %}
+                    <option
+                        value="{{ item.id }}"
+                        {% if finished_item_filter == (item.id|string) %}selected{% endif %}
+                    >
+                        {{ item.name }} ({{ item.sku }})
+                    </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-12 col-sm-4 col-md-3">
+            <label for="status" class="form-label small mb-1">Status</label>
+            <select id="status" name="status" class="form-select form-select-sm">
+                <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All</option>
+                <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Active</option>
+                <option value="inactive" {% if status_filter == 'inactive' %}selected{% endif %}>Inactive</option>
+            </select>
+        </div>
+        <div class="col-12 col-sm-3 col-md-2">
+            <button type="submit" class="btn btn-outline-secondary btn-sm w-100">Filter</button>
+        </div>
+    </div>
+</form>
+
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Finished Product</th>
+                    <th>BOM Name</th>
+                    <th>Version</th>
+                    <th>Expected Yield</th>
+                    <th>Components</th>
+                    <th>Status</th>
+                    <th class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for bom in boms %}
+                    <tr>
+                        <td>
+                            <a href="{{ url_for('master_data.view_item', item_id=bom.finished_item.id) }}" class="text-decoration-none fw-semibold">
+                                {{ bom.finished_item.name }}
+                            </a>
+                            <div class="text-muted small">{{ bom.finished_item.sku }}</div>
+                        </td>
+                        <td>
+                            <a href="{{ url_for('boms.view_bom', bom_id=bom.id) }}" class="text-decoration-none">
+                                {{ bom.name }}
+                            </a>
+                        </td>
+                        <td>
+                            <span class="badge text-bg-light border text-dark">v{{ bom.version }}</span>
+                            {% if bom.id in locked_bom_ids %}
+                                <span class="badge text-bg-warning text-dark">Locked</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ format_milli(bom.expected_yield_milli) }} {{ bom.finished_item.stock_unit.code }}</td>
+                        <td>{{ bom.items|length }}</td>
+                        <td>
+                            {% if bom.is_active %}
+                                <span class="badge text-bg-success">Active</span>
+                            {% else %}
+                                <span class="badge text-bg-secondary">Inactive</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end text-nowrap">
+                            <a href="{{ url_for('boms.view_bom', bom_id=bom.id) }}" class="btn btn-outline-secondary btn-sm">
+                                View
+                            </a>
+                            {% if user_has_permission(current_user, 'manage_products_customers') and bom.id not in locked_bom_ids %}
+                                <a href="{{ url_for('boms.edit_bom', bom_id=bom.id) }}" class="btn btn-outline-primary btn-sm">
+                                    Edit
+                                </a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="7" class="text-center text-muted py-4">No BOMs found.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

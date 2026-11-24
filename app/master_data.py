@@ -4,12 +4,23 @@ from decimal import Decimal, InvalidOperation
 import re
 
 from flask import Blueprint, abort, flash, redirect, render_template, request, url_for
+from flask_login import current_user
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
+from app.audit import log_audit
 from app.csrf import require_csrf_token
 from app.extensions import db
-from app.models import Customer, Item, ItemUnitConversion, Supplier, Unit
+from app.models import (
+    BOM,
+    BOMItem,
+    Customer,
+    Item,
+    ItemUnitConversion,
+    ProductionRun,
+    Supplier,
+    Unit,
+)
 from app.permissions import (
     CAP_MANAGE_PRODUCTS_CUSTOMERS,
     CAP_RECORD_PURCHASES,
@@ -17,6 +28,15 @@ from app.permissions import (
     CAP_VIEW_OWN_SALES_ORDERS,
     roles_required,
     roles_with_permission,
+)
+from app.units import (
+    UnitConversionError,
+    convert_qty_milli,
+    convert_qty_milli_to_stock,
+    format_milli,
+    get_conversion_factor,
+    validate_dimension_unit_graph,
+    validate_item_conversion_graph,
 )
 
 master_data_bp = Blueprint("master_data", __name__, url_prefix="/master")
@@ -169,6 +189,19 @@ def _get_or_404(model, record_id: int):
     return record
 
 
+def _active_boms_using_component(item_id: int) -> list[BOM]:
+    """Return active BOMs that reference `item_id` as a component material."""
+    return db.session.execute(
+        db.select(BOM)
+        .join(BOMItem, BOMItem.bom_id == BOM.id)
+        .where(
+            BOMItem.material_item_id == item_id,
+            BOM.is_active.is_(True),
+        )
+        .order_by(BOM.name.asc(), BOM.version.asc())
+    ).scalars().all()
+
+
 def _validate_item_form(form, *, existing_item: Item | None = None):
     """Validate item create/edit form data and return (cleaned_data, errors, raw_form_values)."""
     sku = (form.get("sku") or "").strip()
@@ -210,6 +243,29 @@ def _validate_item_form(form, *, existing_item: Item | None = None):
 
     if item_type not in ITEM_TYPE_LABELS:
         errors["item_type"] = "Select a valid item type."
+    elif existing_item is not None and item_type != existing_item.item_type:
+        has_finished_boms = (
+            db.session.execute(
+                db.select(BOM.id).where(BOM.finished_item_id == existing_item.id).limit(1)
+            ).first()
+            is not None
+        )
+        has_component_boms = (
+            db.session.execute(
+                db.select(BOMItem.id)
+                .where(BOMItem.material_item_id == existing_item.id)
+                .limit(1)
+            ).first()
+            is not None
+        )
+        if has_finished_boms and item_type != "finished_good":
+            errors["item_type"] = (
+                "Cannot change item type while BOMs exist for this finished product."
+            )
+        elif has_component_boms and item_type not in ("raw_material", "packaging"):
+            errors["item_type"] = (
+                "Cannot change item type to Finished Good while this item is used as a BOM component."
+            )
 
     stock_unit = None
     if not stock_unit_raw:
@@ -222,13 +278,47 @@ def _validate_item_form(form, *, existing_item: Item | None = None):
             stock_unit = None
         if stock_unit is None:
             errors["stock_unit_id"] = "Select a valid base stock unit."
-        elif existing_item is not None and existing_item.unit_conversions:
-            existing_dims = {c.from_unit.dimension for c in existing_item.unit_conversions}
-            if stock_unit.dimension not in existing_dims:
-                errors["stock_unit_id"] = (
-                    "Cannot change stock unit to a different dimension while item unit "
-                    "conversions exist."
+        elif existing_item is not None and stock_unit.id != existing_item.stock_unit_id:
+            if existing_item.unit_conversions:
+                existing_dims = {c.from_unit.dimension for c in existing_item.unit_conversions}
+                if stock_unit.dimension not in existing_dims:
+                    errors["stock_unit_id"] = (
+                        "Cannot change stock unit to a different dimension while item unit "
+                        "conversions exist."
+                    )
+
+            if "stock_unit_id" not in errors:
+                has_finished_boms = (
+                    db.session.execute(
+                        db.select(BOM.id)
+                        .where(BOM.finished_item_id == existing_item.id)
+                        .limit(1)
+                    ).first()
+                    is not None
                 )
+                if has_finished_boms:
+                    errors["stock_unit_id"] = (
+                        "Cannot change stock unit while BOMs exist for this finished product."
+                    )
+
+            if "stock_unit_id" not in errors:
+                dependent_bom_items = db.session.execute(
+                    db.select(BOMItem).where(BOMItem.material_item_id == existing_item.id)
+                ).scalars().all()
+                for bom_item in dependent_bom_items:
+                    try:
+                        convert_qty_milli(
+                            existing_item,
+                            bom_item.standard_qty_milli,
+                            bom_item.input_unit,
+                            stock_unit,
+                        )
+                    except UnitConversionError as exc:
+                        errors["stock_unit_id"] = (
+                            f"Cannot change stock unit because BOM '{bom_item.bom.name}' "
+                            f"(v{bom_item.bom.version}) depends on exact conversion: {exc}"
+                        )
+                        break
 
     normalized_hsn = None
     if hsn_code:
@@ -261,6 +351,15 @@ def _validate_item_form(form, *, existing_item: Item | None = None):
             errors["default_sale_price"] = price_err
         else:
             default_sale_price_paise = parsed_price
+
+    if existing_item is not None and existing_item.is_active and not is_active:
+        active_boms = _active_boms_using_component(existing_item.id)
+        if active_boms:
+            bom_list = ", ".join(f"{bom.name} (v{bom.version})" for bom in active_boms)
+            errors["is_active"] = (
+                f"Cannot deactivate item '{existing_item.name}' because it is a component of "
+                f"active BOM(s): {bom_list}. Deactivate the BOM(s) first."
+            )
 
     cleaned = {
         "sku": sku,
@@ -429,11 +528,17 @@ def _validate_unit_form(form, *, existing_unit: Unit | None = None):
                 .limit(1)
             ).first()
             is not None
+            or db.session.execute(
+                db.select(BOMItem.id)
+                .where(BOMItem.input_unit_id == existing_unit.id)
+                .limit(1)
+            ).first()
+            is not None
         )
         if has_dependents:
             errors["dimension"] = (
                 "Cannot change dimension while this unit is referenced by items, "
-                "other units, or conversions."
+                "other units, conversions, or BOM components."
             )
 
     base_unit = None
@@ -696,10 +801,20 @@ def view_item(item_id: int):
     all_units = db.session.execute(
         db.select(Unit).order_by(Unit.dimension.asc(), Unit.code.asc())
     ).scalars().all()
+    item_boms = (
+        db.session.execute(
+            db.select(BOM)
+            .where(BOM.finished_item_id == item.id)
+            .order_by(BOM.version.desc())
+        ).scalars().all()
+        if item.item_type == "finished_good"
+        else []
+    )
 
     return render_template(
         "master_data/item_detail.html",
         item=item,
+        item_boms=item_boms,
         item_type_labels=ITEM_TYPE_LABELS,
         dimension_labels=UNIT_DIMENSION_LABELS,
         compatible_units=compatible_units,
@@ -708,6 +823,7 @@ def view_item(item_id: int):
         conversion_errors={},
         format_bps=format_bps_as_percent,
         format_paise=format_paise_as_rupees,
+        format_milli=format_milli,
     )
 
 
@@ -762,9 +878,41 @@ def edit_item(item_id: int):
 def toggle_item_active(item_id: int):
     require_csrf_token()
     item = _get_or_404(Item, item_id)
-    item.is_active = not item.is_active
-    db.session.commit()
-    state_word = "activated" if item.is_active else "deactivated"
+
+    if item.is_active:
+        active_boms = _active_boms_using_component(item.id)
+        if active_boms:
+            bom_list = ", ".join(f"{bom.name} (v{bom.version})" for bom in active_boms)
+            flash(
+                f"Cannot deactivate item '{item.name}' because it is a component of "
+                f"active BOM(s): {bom_list}. Deactivate the BOM(s) first.",
+                "danger",
+            )
+            return redirect(url_for("master_data.view_item", item_id=item.id))
+
+    old_active = item.is_active
+    new_active = not old_active
+    state_word = "activated" if new_active else "deactivated"
+    try:
+        item.is_active = new_active
+        log_audit(
+            user_id=current_user.id,
+            action="item_activated" if new_active else "item_deactivated",
+            entity_type="item",
+            entity_id=item.id,
+            summary=f"{state_word.title()} item '{item.name}' ({item.sku})",
+            old_values={"is_active": old_active},
+            new_values={"is_active": new_active},
+        )
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        flash(
+            f"Failed to update status for item '{item.name}'. No changes were saved.",
+            "danger",
+        )
+        return redirect(url_for("master_data.view_item", item_id=item.id))
+
     flash(f"Item '{item.name}' {state_word}.", "info")
     return redirect(url_for("master_data.view_item", item_id=item.id))
 
@@ -780,7 +928,13 @@ def add_item_conversion(item_id: int):
         conversion = ItemUnitConversion(**cleaned)
         db.session.add(conversion)
         try:
+            db.session.flush()
+            validate_item_conversion_graph(item)
             db.session.commit()
+        except UnitConversionError as exc:
+            db.session.rollback()
+            errors["multiplier"] = str(exc)
+            flash(f"Cannot add conversion: {exc}", "danger")
         except IntegrityError:
             db.session.rollback()
             errors["to_unit_id"] = "Could not save conversion due to duplicate or invalid units."
@@ -796,10 +950,20 @@ def add_item_conversion(item_id: int):
     all_units = db.session.execute(
         db.select(Unit).order_by(Unit.dimension.asc(), Unit.code.asc())
     ).scalars().all()
+    item_boms = (
+        db.session.execute(
+            db.select(BOM)
+            .where(BOM.finished_item_id == item.id)
+            .order_by(BOM.version.desc())
+        ).scalars().all()
+        if item.item_type == "finished_good"
+        else []
+    )
 
     return render_template(
         "master_data/item_detail.html",
         item=item,
+        item_boms=item_boms,
         item_type_labels=ITEM_TYPE_LABELS,
         dimension_labels=UNIT_DIMENSION_LABELS,
         compatible_units=compatible_units,
@@ -808,6 +972,7 @@ def add_item_conversion(item_id: int):
         conversion_errors=errors,
         format_bps=format_bps_as_percent,
         format_paise=format_paise_as_rupees,
+        format_milli=format_milli,
     )
 
 
@@ -837,7 +1002,80 @@ def edit_item_conversion(item_id: int, conversion_id: int):
         flash(first_error, "danger")
         return redirect(url_for("master_data.view_item", item_id=item.id))
 
+    old_multiplier = conversion.multiplier
+    multiplier_changed = cleaned["multiplier"] != old_multiplier
+
+    locked_bom_items = db.session.execute(
+        db.select(BOMItem)
+        .join(BOM, BOMItem.bom_id == BOM.id)
+        .where(
+            BOMItem.material_item_id == item.id,
+            db.exists(db.select(ProductionRun.id).where(ProductionRun.bom_id == BOM.id)),
+        )
+    ).scalars().all()
+
+    locked_before: dict[int, tuple] = {}
+    if multiplier_changed:
+        for bom_item in locked_bom_items:
+            if bom_item.input_unit_id != item.stock_unit_id:
+                try:
+                    old_factor = get_conversion_factor(item, bom_item.input_unit, item.stock_unit)
+                except UnitConversionError:
+                    old_factor = None
+                try:
+                    factor_without = get_conversion_factor(
+                        item,
+                        bom_item.input_unit,
+                        item.stock_unit,
+                        exclude_conversion_id=conversion.id,
+                    )
+                except UnitConversionError:
+                    factor_without = None
+                locked_before[bom_item.id] = (old_factor, factor_without)
+
     conversion.multiplier = cleaned["multiplier"]
+    try:
+        db.session.flush()
+        validate_item_conversion_graph(item)
+    except UnitConversionError as exc:
+        db.session.rollback()
+        flash(f"Cannot update conversion: {exc}", "danger")
+        return redirect(url_for("master_data.view_item", item_id=item.id))
+
+    if multiplier_changed:
+        for bom_item in locked_bom_items:
+            if bom_item.id in locked_before:
+                old_factor, factor_without = locked_before[bom_item.id]
+                new_factor = get_conversion_factor(item, bom_item.input_unit, item.stock_unit)
+                if factor_without is None or new_factor != old_factor:
+                    db.session.rollback()
+                    flash(
+                        f"Cannot update conversion multiplier because BOM '{bom_item.bom.name}' "
+                        f"(v{bom_item.bom.version}) is locked by production runs and depends on "
+                        f"this conversion for historical quantity interpretation.",
+                        "danger",
+                    )
+                    return redirect(url_for("master_data.view_item", item_id=item.id))
+
+    dependent_bom_items = db.session.execute(
+        db.select(BOMItem).where(BOMItem.material_item_id == item.id)
+    ).scalars().all()
+    for bom_item in dependent_bom_items:
+        try:
+            convert_qty_milli_to_stock(
+                item,
+                bom_item.standard_qty_milli,
+                bom_item.input_unit,
+            )
+        except UnitConversionError as exc:
+            db.session.rollback()
+            flash(
+                f"Cannot update conversion multiplier because BOM '{bom_item.bom.name}' "
+                f"(v{bom_item.bom.version}) would lose exact conversion: {exc}",
+                "danger",
+            )
+            return redirect(url_for("master_data.view_item", item_id=item.id))
+
     db.session.commit()
     flash("Item unit conversion updated.", "success")
     return redirect(url_for("master_data.view_item", item_id=item.id))
@@ -853,6 +1091,26 @@ def delete_item_conversion(item_id: int, conversion_id: int):
     conversion = _get_or_404(ItemUnitConversion, conversion_id)
     if conversion.item_id != item.id:
         abort(404)
+
+    dependent_bom_items = db.session.execute(
+        db.select(BOMItem).where(BOMItem.material_item_id == item.id)
+    ).scalars().all()
+    for bom_item in dependent_bom_items:
+        try:
+            convert_qty_milli_to_stock(
+                item,
+                bom_item.standard_qty_milli,
+                bom_item.input_unit,
+                exclude_conversion_id=conversion.id,
+            )
+        except UnitConversionError:
+            flash(
+                f"Cannot remove conversion '1 {conversion.from_unit.code} = "
+                f"{conversion.multiplier} {conversion.to_unit.code}' because BOM "
+                f"'{bom_item.bom.name}' (v{bom_item.bom.version}) depends on it.",
+                "danger",
+            )
+            return redirect(url_for("master_data.view_item", item_id=item.id))
 
     db.session.delete(conversion)
     db.session.commit()
@@ -1151,7 +1409,13 @@ def create_unit():
             unit = Unit(**cleaned)
             db.session.add(unit)
             try:
+                db.session.flush()
+                validate_dimension_unit_graph(unit.dimension)
                 db.session.commit()
+            except UnitConversionError as exc:
+                db.session.rollback()
+                errors["factor_to_base"] = str(exc)
+                flash(f"Cannot create unit: {exc}", "danger")
             except IntegrityError:
                 db.session.rollback()
                 errors["code"] = "Could not save unit because code must be unique."
@@ -1193,16 +1457,125 @@ def edit_unit(unit_id: int):
         require_csrf_token()
         cleaned, errors, values = _validate_unit_form(request.form, existing_unit=unit)
         if not errors:
-            for field, val in cleaned.items():
-                setattr(unit, field, val)
-            try:
-                db.session.commit()
-            except IntegrityError:
-                db.session.rollback()
-                errors["code"] = "Could not update unit because code must be unique."
+            ratio_changed = (
+                unit.base_unit_id != cleaned["base_unit_id"]
+                or unit.factor_to_base != cleaned["factor_to_base"]
+            )
+            locked_before: dict[int, tuple] = {}
+            direct_locked_bom = None
+            if ratio_changed:
+                direct_locked_bom_item = db.session.execute(
+                    db.select(BOMItem)
+                    .join(BOM, BOMItem.bom_id == BOM.id)
+                    .join(Item, BOMItem.material_item_id == Item.id)
+                    .where(
+                        db.exists(db.select(ProductionRun.id).where(ProductionRun.bom_id == BOM.id)),
+                        (BOMItem.input_unit_id == unit.id) | (Item.stock_unit_id == unit.id),
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
+                if direct_locked_bom_item is not None:
+                    direct_locked_bom = direct_locked_bom_item.bom
+                else:
+                    direct_locked_bom = db.session.execute(
+                        db.select(BOM)
+                        .join(Item, BOM.finished_item_id == Item.id)
+                        .where(
+                            db.exists(
+                                db.select(ProductionRun.id).where(ProductionRun.bom_id == BOM.id)
+                            ),
+                            Item.stock_unit_id == unit.id,
+                        )
+                        .limit(1)
+                    ).scalar_one_or_none()
+
+                locked_dim_bom_items = db.session.execute(
+                    db.select(BOMItem)
+                    .join(BOM, BOMItem.bom_id == BOM.id)
+                    .join(Unit, BOMItem.input_unit_id == Unit.id)
+                    .where(
+                        Unit.dimension == unit.dimension,
+                        db.exists(db.select(ProductionRun.id).where(ProductionRun.bom_id == BOM.id)),
+                    )
+                ).scalars().all()
+                for bom_item in locked_dim_bom_items:
+                    if bom_item.input_unit_id != bom_item.material_item.stock_unit_id:
+                        try:
+                            old_factor = get_conversion_factor(
+                                bom_item.material_item,
+                                bom_item.input_unit,
+                                bom_item.material_item.stock_unit,
+                            )
+                        except UnitConversionError:
+                            old_factor = None
+                        locked_before[bom_item.id] = (bom_item, old_factor)
+
+            if ratio_changed and direct_locked_bom is not None:
+                msg = (
+                    f"Cannot change unit conversion factor because BOM '{direct_locked_bom.name}' "
+                    f"(v{direct_locked_bom.version}) is locked by production runs and references "
+                    f"unit '{unit.code}'."
+                )
+                errors["factor_to_base"] = msg
+                flash(msg, "danger")
             else:
-                flash(f"Unit '{unit.code}' updated.", "success")
-                return redirect(url_for("master_data.list_units"))
+                for field, val in cleaned.items():
+                    setattr(unit, field, val)
+                try:
+                    db.session.flush()
+                    validate_dimension_unit_graph(unit.dimension)
+                    if ratio_changed:
+                        for bom_item, old_factor in locked_before.values():
+                            new_factor = get_conversion_factor(
+                                bom_item.material_item,
+                                bom_item.input_unit,
+                                bom_item.material_item.stock_unit,
+                            )
+                            if new_factor is None or new_factor != old_factor:
+                                db.session.rollback()
+                                msg = (
+                                    f"Cannot change unit conversion factor because BOM "
+                                    f"'{bom_item.bom.name}' (v{bom_item.bom.version}) is locked "
+                                    f"by production runs and its historical quantities would be "
+                                    f"reinterpreted."
+                                )
+                                errors["factor_to_base"] = msg
+                                flash(msg, "danger")
+                                break
+
+                        if not errors:
+                            dim_bom_items = db.session.execute(
+                                db.select(BOMItem)
+                                .join(Unit, BOMItem.input_unit_id == Unit.id)
+                                .where(Unit.dimension == unit.dimension)
+                            ).scalars().all()
+                            for bom_item in dim_bom_items:
+                                try:
+                                    convert_qty_milli_to_stock(
+                                        bom_item.material_item,
+                                        bom_item.standard_qty_milli,
+                                        bom_item.input_unit,
+                                    )
+                                except UnitConversionError as exc:
+                                    db.session.rollback()
+                                    errors["factor_to_base"] = (
+                                        f"Cannot change unit ratio because BOM '{bom_item.bom.name}' "
+                                        f"(v{bom_item.bom.version}) depends on it: {exc}"
+                                    )
+                                    break
+                    if not errors:
+                        db.session.commit()
+                except UnitConversionError as exc:
+                    db.session.rollback()
+                    errors["factor_to_base"] = str(exc)
+                    flash(f"Cannot update unit: {exc}", "danger")
+                except IntegrityError:
+                    db.session.rollback()
+                    errors["code"] = "Could not update unit because code must be unique."
+                else:
+                    if not errors:
+                        flash(f"Unit '{unit.code}' updated.", "success")
+                        return redirect(url_for("master_data.list_units"))
 
     return render_template(
         "master_data/unit_form.html",
@@ -1240,7 +1613,15 @@ def create_conversion():
             conversion = ItemUnitConversion(**cleaned)
             db.session.add(conversion)
             try:
+                db.session.flush()
+                target_item = db.session.get(Item, cleaned["item_id"])
+                if target_item is not None:
+                    validate_item_conversion_graph(target_item)
                 db.session.commit()
+            except UnitConversionError as exc:
+                db.session.rollback()
+                errors["multiplier"] = str(exc)
+                flash(f"Cannot create conversion: {exc}", "danger")
             except IntegrityError:
                 db.session.rollback()
                 errors["to_unit_id"] = "Could not save conversion due to duplicate or invalid units."

@@ -154,10 +154,13 @@
                             id="is_active"
                             name="is_active"
                             value="1"
-                            class="form-check-input"
+                            class="form-check-input {% if errors.get('is_active') %}is-invalid{% endif %}"
                             {% if values.is_active %}checked{% endif %}
                         >
                         <label for="is_active" class="form-check-label">Active</label>
+                        {% if errors.get('is_active') %}
+                            <div class="invalid-feedback">{{ errors['is_active'] }}</div>
+                        {% endif %}
                     </div>
                 </div>
             </div>

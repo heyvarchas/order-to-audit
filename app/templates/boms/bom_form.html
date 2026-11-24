@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+
+{% block title %}{{ 'Edit BOM' if mode == 'edit' else 'New BOM' }} | Order-to-Audit{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h3 mb-0">{{ 'Edit BOM' if mode == 'edit' else 'New BOM' }}</h1>
+    <a
+        href="{{ url_for('boms.view_bom', bom_id=bom.id) if mode == 'edit' else url_for('boms.list_boms') }}"
+        class="btn btn-outline-secondary btn-sm"
+    >
+        {{ 'Back to BOM' if mode == 'edit' else 'Back to BOMs' }}
+    </a>
+</div>
+
+{% if mode == 'create' and not finished_items %}
+    <div class="alert alert-warning">
+        No active Finished Good items exist yet.
+        <a href="{{ url_for('master_data.create_item') }}" class="alert-link">Create a Finished Good item first</a>
+        before creating a BOM.
+    </div>
+{% endif %}
+
+{% if errors.get('is_active') %}
+    <div class="alert alert-danger">{{ errors['is_active'] }}</div>
+{% endif %}
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        {% if mode == 'create' %}
+            <p class="text-muted small">
+                New BOMs start as <strong>Inactive</strong>. Add raw materials and packaging components
+                on the next screen, then activate the BOM explicitly.
+            </p>
+        {% else %}
+            <div class="mb-3 small text-muted">
+                Finished Product: <strong>{{ bom.finished_item.name }}</strong> ({{ bom.finished_item.sku }})
+                &middot; Version: <strong>v{{ bom.version }}</strong>
+                &middot; Stock Unit: <strong>{{ bom.finished_item.stock_unit.code }}</strong>
+            </div>
+        {% endif %}
+
+        <form method="post" novalidate>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <div class="row g-3">
+                {% if mode == 'create' %}
+                    <div class="col-12 col-md-8">
+                        <label for="finished_item_id" class="form-label">Finished Product *</label>
+                        <select
+                            id="finished_item_id"
+                            name="finished_item_id"
+                            class="form-select {% if errors.get('finished_item_id') %}is-invalid{% endif %}"
+                            required
+                        >
+                            <option value="">-- Select Finished Product --</option>
+                            {% for item in finished_items %}
+                                <option
+                                    value="{{ item.id }}"
+                                    {% if values.finished_item_id == (item.id|string) %}selected{% endif %}
+                                >
+                                    {{ item.name }} ({{ item.sku }}) — Yield unit: {{ item.stock_unit.code }}
+                                </option>
+                            {% endfor %}
+                        </select>
+                        {% if errors.get('finished_item_id') %}
+                            <div class="invalid-feedback">{{ errors['finished_item_id'] }}</div>
+                        {% endif %}
+                    </div>
+
+                    <div class="col-12 col-md-4">
+                        <label for="version" class="form-label">Version (Optional)</label>
+                        <input
+                            type="number"
+                            id="version"
+                            name="version"
+                            min="1"
+                            value="{{ values.version }}"
+                            placeholder="Auto (next version)"
+                            class="form-control {% if errors.get('version') %}is-invalid{% endif %}"
+                        >
+                        {% if errors.get('version') %}
+                            <div class="invalid-feedback">{{ errors['version'] }}</div>
+                        {% endif %}
+                        <div class="form-text">Leave blank to auto-assign the next version number.</div>
+                    </div>
+                {% endif %}
+
+                <div class="col-12 col-md-7">
+                    <label for="name" class="form-label">BOM Name *</label>
+                    <input
+                        type="text"
+                        id="name"
+                        name="name"
+                        value="{{ values.name }}"
+                        maxlength="150"
+                        placeholder="e.g. Murukku 200 g Standard Batch"
+                        class="form-control {% if errors.get('name') %}is-invalid{% endif %}"
+                        required
+                    >
+                    {% if errors.get('name') %}
+                        <div class="invalid-feedback">{{ errors['name'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-5">
+                    <label for="expected_yield" class="form-label">
+                        Expected Yield per Batch
+                        {% if mode == 'edit' %}({{ bom.finished_item.stock_unit.code }}){% endif %} *
+                    </label>
+                    <input
+                        type="text"
+                        id="expected_yield"
+                        name="expected_yield"
+                        value="{{ values.expected_yield }}"
+                        inputmode="decimal"
+                        placeholder="e.g. 200"
+                        class="form-control {% if errors.get('expected_yield') %}is-invalid{% endif %}"
+                        required
+                    >
+                    {% if errors.get('expected_yield') %}
+                        <div class="invalid-feedback">{{ errors['expected_yield'] }}</div>
+                    {% endif %}
+                    <div class="form-text">
+                        Positive quantity in the finished product's base stock unit (up to 3 decimals).
+                    </div>
+                </div>
+            </div>
+
+            <div class="d-flex flex-wrap gap-2 mt-4">
+                <button type="submit" class="btn btn-primary">
+                    {{ 'Save Changes' if mode == 'edit' else 'Create BOM' }}
+                </button>
+                <a
+                    href="{{ url_for('boms.view_bom', bom_id=bom.id) if mode == 'edit' else url_for('boms.list_boms') }}"
+                    class="btn btn-outline-secondary"
+                >
+                    Cancel
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
