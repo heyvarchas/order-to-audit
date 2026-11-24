@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}Purchases | Order-to-Audit{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h3 mb-0">Purchases</h1>
+    {% if can_write_purchases %}
+        <a href="{{ url_for('purchases.create_purchase') }}" class="btn btn-primary btn-sm">
+            + New Purchase
+        </a>
+    {% endif %}
+</div>
+
+<form method="get" class="card card-body shadow-sm mb-3">
+    <div class="row g-2 align-items-end">
+        <div class="col-12 col-sm-6 col-lg-3">
+            <label for="supplier_id" class="form-label small mb-1">Supplier</label>
+            <select id="supplier_id" name="supplier_id" class="form-select form-select-sm">
+                <option value="">All Suppliers</option>
+                {% for sup in suppliers %}
+                    <option
+                        value="{{ sup.id }}"
+                        {% if supplier_filter == (sup.id|string) %}selected{% endif %}
+                    >
+                        {{ sup.name }}{% if not sup.is_active %} (Inactive){% endif %}
+                    </option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="col-12 col-sm-6 col-lg-2">
+            <label for="status" class="form-label small mb-1">Status</label>
+            <select id="status" name="status" class="form-select form-select-sm">
+                <option value="">All Statuses</option>
+                {% for code, label in statuses %}
+                    <option value="{{ code }}" {% if status_filter == code %}selected{% endif %}>
+                        {{ label }}
+                    </option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="col-12 col-sm-6 col-lg-2">
+            <label for="date_from" class="form-label small mb-1">From Date</label>
+            <input
+                type="date"
+                id="date_from"
+                name="date_from"
+                value="{{ date_from_filter }}"
+                class="form-control form-control-sm"
+            >
+        </div>
+
+        <div class="col-12 col-sm-6 col-lg-2">
+            <label for="date_to" class="form-label small mb-1">To Date</label>
+            <input
+                type="date"
+                id="date_to"
+                name="date_to"
+                value="{{ date_to_filter }}"
+                class="form-control form-control-sm"
+            >
+        </div>
+
+        <div class="col-12 col-lg-3 d-flex gap-2">
+            <button type="submit" class="btn btn-outline-secondary btn-sm flex-grow-1">Filter</button>
+            <a href="{{ url_for('purchases.list_purchases') }}" class="btn btn-outline-secondary btn-sm">
+                Reset
+            </a>
+        </div>
+    </div>
+</form>
+
+{% if filter_errors %}
+    <div class="alert alert-danger">
+        {% for err in filter_errors %}
+            <div>{{ err }}</div>
+        {% endfor %}
+    </div>
+{% endif %}
+
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Purchase No.</th>
+                    <th>Date</th>
+                    <th>Supplier</th>
+                    <th>Supplier Invoice</th>
+                    <th>GST Type</th>
+                    {% if can_view_valuation %}
+                        <th class="text-end">Subtotal (₹)</th>
+                        <th class="text-end">GST (₹)</th>
+                        <th class="text-end">Total (₹)</th>
+                    {% endif %}
+                    <th>Status</th>
+                    <th class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for purchase in purchases %}
+                    {% set total_gst = purchase.cgst_paise + purchase.sgst_paise + purchase.igst_paise %}
+                    <tr>
+                        <td class="text-nowrap fw-semibold">
+                            <a href="{{ url_for('purchases.view_purchase', purchase_id=purchase.id) }}" class="text-decoration-none">
+                                {{ purchase.purchase_number }}
+                            </a>
+                        </td>
+                        <td class="text-nowrap">{{ purchase.purchase_date.isoformat() }}</td>
+                        <td>
+                            {% if can_view_suppliers %}
+                                <a
+                                    href="{{ url_for('master_data.view_supplier', supplier_id=purchase.supplier.id) }}"
+                                    class="text-decoration-none"
+                                >
+                                    {{ purchase.supplier.name }}
+                                </a>
+                            {% else %}
+                                {{ purchase.supplier.name }}
+                            {% endif %}
+                        </td>
+                        <td class="small text-muted">{{ purchase.supplier_invoice_no or '—' }}</td>
+                        <td class="small">{{ gst_type_labels.get(purchase.gst_type, purchase.gst_type) }}</td>
+                        {% if can_view_valuation %}
+                            <td class="text-end text-nowrap">₹{{ format_paise(purchase.subtotal_paise) }}</td>
+                            <td class="text-end text-nowrap">₹{{ format_paise(total_gst) }}</td>
+                            <td class="text-end text-nowrap fw-semibold">₹{{ format_paise(purchase.total_paise) }}</td>
+                        {% endif %}
+                        <td>
+                            {% if purchase.status == 'posted' %}
+                                <span class="badge text-bg-success">Posted</span>
+                            {% elif purchase.status == 'cancelled' %}
+                                <span class="badge text-bg-danger">Cancelled</span>
+                            {% else %}
+                                <span class="badge text-bg-secondary">Draft</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end text-nowrap">
+                            <a
+                                href="{{ url_for('purchases.view_purchase', purchase_id=purchase.id) }}"
+                                class="btn btn-outline-secondary btn-sm"
+                            >
+                                View
+                            </a>
+                            {% if can_write_purchases and purchase.status == 'draft' %}
+                                <a
+                                    href="{{ url_for('purchases.edit_purchase', purchase_id=purchase.id) }}"
+                                    class="btn btn-outline-primary btn-sm"
+                                >
+                                    Edit
+                                </a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="{{ 10 if can_view_valuation else 7 }}" class="text-center text-muted py-4">
+                            No purchases found.
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

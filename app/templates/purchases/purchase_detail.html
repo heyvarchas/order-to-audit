@@ -1,0 +1,697 @@
+{% extends "base.html" %}
+
+{% block title %}{{ purchase.purchase_number }} | Purchases | Order-to-Audit{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-0">
+            {{ purchase.purchase_number }}
+            {% if purchase.status == 'posted' %}
+                <span class="badge text-bg-success fs-6 align-middle">Posted</span>
+            {% elif purchase.status == 'cancelled' %}
+                <span class="badge text-bg-danger fs-6 align-middle">Cancelled</span>
+            {% else %}
+                <span class="badge text-bg-secondary fs-6 align-middle">Draft</span>
+            {% endif %}
+        </h1>
+        <div class="text-muted small">
+            Supplier:
+            {% if can_view_suppliers %}
+                <a
+                    href="{{ url_for('master_data.view_supplier', supplier_id=purchase.supplier.id) }}"
+                    class="text-decoration-none"
+                >
+                    {{ purchase.supplier.name }}
+                </a>
+            {% else %}
+                <span>{{ purchase.supplier.name }}</span>
+            {% endif %}
+            &middot; Date: {{ purchase.purchase_date.isoformat() }}
+        </div>
+    </div>
+
+    <div class="d-flex flex-wrap gap-2">
+        <a href="{{ url_for('purchases.list_purchases') }}" class="btn btn-outline-secondary btn-sm">
+            Back to Purchases
+        </a>
+
+        {% if can_write_purchases %}
+            {% if purchase.status == 'draft' %}
+                <a
+                    href="{{ url_for('purchases.edit_purchase', purchase_id=purchase.id) }}"
+                    class="btn btn-primary btn-sm"
+                >
+                    Edit Header
+                </a>
+                <button
+                    type="button"
+                    class="btn btn-success btn-sm"
+                    data-bs-toggle="modal"
+                    data-bs-target="#postPurchaseModal"
+                    {% if not line_rows %}disabled title="Add at least one line item before posting"{% endif %}
+                >
+                    Post Purchase
+                </button>
+                <button
+                    type="button"
+                    class="btn btn-outline-danger btn-sm"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#cancelPurchaseCollapse"
+                    aria-expanded="{{ 'true' if cancel_errors else 'false' }}"
+                    aria-controls="cancelPurchaseCollapse"
+                >
+                    Cancel Draft
+                </button>
+            {% elif purchase.status == 'posted' %}
+                <button
+                    type="button"
+                    class="btn btn-outline-danger btn-sm"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#cancelPurchaseCollapse"
+                    aria-expanded="{{ 'true' if cancel_errors else 'false' }}"
+                    aria-controls="cancelPurchaseCollapse"
+                >
+                    Cancel &amp; Reverse Purchase
+                </button>
+            {% endif %}
+        {% endif %}
+    </div>
+</div>
+
+{% if purchase.status == 'posted' %}
+    <div class="alert alert-success small">
+        <strong>Posted &amp; Locked:</strong> This purchase has been posted to the immutable stock ledger
+        and cannot be edited. If posted in error, use <strong>Cancel &amp; Reverse Purchase</strong> to
+        append reversing stock ledger entries.
+    </div>
+{% elif purchase.status == 'cancelled' %}
+    <div class="alert alert-danger small">
+        <strong>Cancelled:</strong> This purchase is locked and cannot be edited or posted.
+        {% if cancellation_info %}
+            <div class="mt-1">
+                <strong>Reason:</strong> {{ cancellation_info.reason }}
+                {% if cancellation_info.cancellation_date %}
+                    <span class="text-muted">
+                        (Reversal Date: {{ cancellation_info.cancellation_date }})
+                    </span>
+                {% endif %}
+                {% if cancellation_info.actor_name %}
+                    <span class="text-muted">&middot; By {{ cancellation_info.actor_name }}</span>
+                {% endif %}
+            </div>
+        {% endif %}
+    </div>
+{% endif %}
+
+{% if can_write_purchases and purchase.status in ('draft', 'posted') %}
+    <div
+        class="collapse {% if cancel_errors %}show{% endif %} mb-4"
+        id="cancelPurchaseCollapse"
+    >
+        <div class="card border-danger shadow-sm">
+            <div class="card-header bg-danger-subtle text-danger-emphasis fw-semibold">
+                {% if purchase.status == 'posted' %}
+                    Cancel Posted Purchase &amp; Reverse Stock Receipts
+                {% else %}
+                    Cancel Draft Purchase
+                {% endif %}
+            </div>
+            <div class="card-body">
+                {% if purchase.status == 'posted' %}
+                    <p class="small text-muted mb-3">
+                        Cancelling this posted purchase will append <strong>Reversal Out</strong> entries
+                        to the stock ledger using today's business date (IST). Cancellation is blocked
+                        atomically if reversing any receipt would cause negative stock quantity or
+                        negative inventory value.
+                    </p>
+                {% else %}
+                    <p class="small text-muted mb-3">
+                        Cancelling this draft marks it permanently as <strong>Cancelled</strong> without
+                        affecting inventory. Its purchase number will not be reused.
+                    </p>
+                {% endif %}
+                <form
+                    method="post"
+                    action="{{ url_for('purchases.cancel_purchase_action', purchase_id=purchase.id) }}"
+                    novalidate
+                >
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <div class="mb-3">
+                        <label for="cancel_reason" class="form-label small fw-semibold">
+                            Cancellation Reason *
+                        </label>
+                        <textarea
+                            id="cancel_reason"
+                            name="reason"
+                            rows="2"
+                            placeholder="State why this purchase is being cancelled..."
+                            class="form-control form-control-sm {% if cancel_errors.get('reason') %}is-invalid{% endif %}"
+                            required
+                        >{{ cancel_values.reason }}</textarea>
+                        {% if cancel_errors.get('reason') %}
+                            <div class="invalid-feedback">{{ cancel_errors['reason'] }}</div>
+                        {% endif %}
+                    </div>
+                    <div class="d-flex flex-wrap gap-2">
+                        <button type="submit" class="btn btn-danger btn-sm">
+                            {{ 'Confirm Cancel & Reverse' if purchase.status == 'posted' else 'Confirm Cancel Draft' }}
+                        </button>
+                        <button
+                            type="button"
+                            class="btn btn-outline-secondary btn-sm"
+                            data-bs-toggle="collapse"
+                            data-bs-target="#cancelPurchaseCollapse"
+                        >
+                            Close
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+{% endif %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-white fw-semibold">Purchase Header</div>
+    <div class="card-body">
+        <dl class="row mb-0">
+            <dt class="col-sm-4 col-md-3">Purchase Number</dt>
+            <dd class="col-sm-8 col-md-9 fw-semibold">{{ purchase.purchase_number }}</dd>
+
+            <dt class="col-sm-4 col-md-3">Supplier</dt>
+            <dd class="col-sm-8 col-md-9">
+                {% if can_view_suppliers %}
+                    <a
+                        href="{{ url_for('master_data.view_supplier', supplier_id=purchase.supplier.id) }}"
+                        class="text-decoration-none fw-semibold"
+                    >
+                        {{ purchase.supplier.name }}
+                    </a>
+                {% else %}
+                    <span class="fw-semibold">{{ purchase.supplier.name }}</span>
+                {% endif %}
+                <span class="text-muted small">
+                    ({{ purchase.supplier.state }}{% if purchase.supplier.gstin %} &middot; GSTIN: {{ purchase.supplier.gstin }}{% endif %})
+                </span>
+            </dd>
+
+            <dt class="col-sm-4 col-md-3">Purchase Date</dt>
+            <dd class="col-sm-8 col-md-9">{{ purchase.purchase_date.isoformat() }}</dd>
+
+            <dt class="col-sm-4 col-md-3">Supplier Invoice No.</dt>
+            <dd class="col-sm-8 col-md-9">{{ purchase.supplier_invoice_no or '—' }}</dd>
+
+            <dt class="col-sm-4 col-md-3">GST Type</dt>
+            <dd class="col-sm-8 col-md-9">{{ gst_type_labels.get(purchase.gst_type, purchase.gst_type) }}</dd>
+
+            <dt class="col-sm-4 col-md-3">Status</dt>
+            <dd class="col-sm-8 col-md-9">{{ status_labels.get(purchase.status, purchase.status) }}</dd>
+
+            <dt class="col-sm-4 col-md-3">Created By</dt>
+            <dd class="col-sm-8 col-md-9">
+                {{ purchase.creator.full_name if purchase.creator else '—' }}
+                <span class="text-muted small">({{ purchase.created_at.strftime('%Y-%m-%d %H:%M UTC') }})</span>
+            </dd>
+
+            <dt class="col-sm-4 col-md-3">Notes</dt>
+            <dd class="col-sm-8 col-md-9">{{ purchase.notes or '—' }}</dd>
+        </dl>
+    </div>
+</div>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <span class="fw-semibold">{{ 'Line Items & GST Breakdown' if can_view_valuation else 'Line Items' }}</span>
+        <span class="text-muted small">{{ line_rows|length }} line{{ '' if line_rows|length == 1 else 's' }}</span>
+    </div>
+    <div class="card-body">
+        {% if line_rows %}
+            <div class="table-responsive mb-3">
+                <table class="table table-sm align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Item</th>
+                            <th class="text-end">Entered Qty</th>
+                            <th class="text-end">Stock Qty</th>
+                            {% if can_view_valuation %}
+                                <th class="text-end">Rate / Unit (₹)</th>
+                                <th class="text-end">Taxable (₹)</th>
+                                <th class="text-end">GST %</th>
+                                {% if purchase.gst_type == 'intra_state' %}
+                                    <th class="text-end">CGST (₹)</th>
+                                    <th class="text-end">SGST (₹)</th>
+                                {% elif purchase.gst_type == 'inter_state' %}
+                                    <th class="text-end">IGST (₹)</th>
+                                {% endif %}
+                                <th class="text-end">Line Total (₹)</th>
+                            {% endif %}
+                            {% if can_write_purchases and purchase.status == 'draft' %}
+                                <th class="text-end">Actions</th>
+                            {% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in line_rows %}
+                            {% set line = row.line %}
+                            <tr>
+                                <td>
+                                    <a
+                                        href="{{ url_for('master_data.view_item', item_id=line.item.id) }}"
+                                        class="text-decoration-none fw-semibold"
+                                    >
+                                        {{ line.item.name }}
+                                    </a>
+                                    <div class="text-muted small">
+                                        {{ line.item.sku }}
+                                        {% if line.item.hsn_code %}&middot; HSN {{ line.item.hsn_code }}{% endif %}
+                                    </div>
+                                </td>
+                                <td class="text-end text-nowrap">
+                                    <strong>{{ format_milli(line.entered_qty_milli) }} {{ line.entered_unit.code }}</strong>
+                                </td>
+                                <td class="text-end text-nowrap text-muted">
+                                    {{ format_milli(line.qty_stock_milli) }} {{ line.item.stock_unit.code }}
+                                </td>
+                                {% if can_view_valuation %}
+                                    <td class="text-end text-nowrap">₹{{ format_paise(line.unit_rate_paise) }}</td>
+                                    <td class="text-end text-nowrap">₹{{ format_paise(line.taxable_value_paise) }}</td>
+                                    <td class="text-end text-nowrap">{{ format_bps(line.gst_rate_bps) }}%</td>
+                                    {% if purchase.gst_type == 'intra_state' %}
+                                        <td class="text-end text-nowrap">₹{{ format_paise(line.cgst_paise) }}</td>
+                                        <td class="text-end text-nowrap">₹{{ format_paise(line.sgst_paise) }}</td>
+                                    {% elif purchase.gst_type == 'inter_state' %}
+                                        <td class="text-end text-nowrap">₹{{ format_paise(line.igst_paise) }}</td>
+                                    {% endif %}
+                                    <td class="text-end text-nowrap fw-semibold">₹{{ format_paise(line.line_total_paise) }}</td>
+                                {% endif %}
+                                {% if can_write_purchases and purchase.status == 'draft' %}
+                                    <td class="text-end">
+                                        <div class="d-inline-flex flex-wrap gap-1 justify-content-end">
+                                            {% if can_view_valuation %}
+                                                <form
+                                                    method="post"
+                                                    action="{{ url_for('purchases.edit_purchase_item', purchase_id=purchase.id, purchase_item_id=line.id) }}"
+                                                    class="d-inline-flex flex-wrap gap-1 m-0"
+                                                >
+                                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                                    <input
+                                                        type="text"
+                                                        name="entered_qty"
+                                                        value="{{ format_milli(line.entered_qty_milli) }}"
+                                                        inputmode="decimal"
+                                                        class="form-control form-control-sm"
+                                                        style="width: 5rem;"
+                                                        aria-label="Quantity"
+                                                        title="Entered Quantity"
+                                                    >
+                                                    <select
+                                                        name="entered_unit_id"
+                                                        class="form-select form-select-sm"
+                                                        style="width: 5.5rem;"
+                                                        aria-label="Unit"
+                                                    >
+                                                        {% for u in row.convertible_units %}
+                                                            <option
+                                                                value="{{ u.id }}"
+                                                                {% if u.id == line.entered_unit_id %}selected{% endif %}
+                                                            >
+                                                                {{ u.code }}
+                                                            </option>
+                                                        {% endfor %}
+                                                    </select>
+                                                    <input
+                                                        type="text"
+                                                        name="unit_rate"
+                                                        value="{{ format_paise(line.unit_rate_paise) }}"
+                                                        inputmode="decimal"
+                                                        class="form-control form-control-sm"
+                                                        style="width: 5.5rem;"
+                                                        aria-label="Unit Rate"
+                                                        title="Rate per Entered Unit (₹)"
+                                                    >
+                                                    {% if purchase.gst_type != 'none' %}
+                                                        <input
+                                                            type="text"
+                                                            name="gst_rate"
+                                                            value="{{ format_bps(line.gst_rate_bps) }}"
+                                                            inputmode="decimal"
+                                                            class="form-control form-control-sm"
+                                                            style="width: 4rem;"
+                                                            aria-label="GST Rate (%)"
+                                                            title="GST Rate (%)"
+                                                        >
+                                                    {% endif %}
+                                                    <button type="submit" class="btn btn-outline-primary btn-sm">Update</button>
+                                                </form>
+                                            {% endif %}
+                                            <form
+                                                method="post"
+                                                action="{{ url_for('purchases.delete_purchase_item', purchase_id=purchase.id, purchase_item_id=line.id) }}"
+                                                class="m-0"
+                                            >
+                                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                                <button type="submit" class="btn btn-outline-danger btn-sm">Remove</button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                {% endif %}
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="text-muted small mb-3">
+                No line items added yet.
+                {% if can_write_purchases and purchase.status == 'draft' %}
+                    Add at least one item below before posting this purchase.
+                {% endif %}
+            </p>
+        {% endif %}
+
+        {% if can_view_valuation %}
+            <div class="row justify-content-end mb-3">
+                <div class="col-12 col-md-6 col-lg-4">
+                    <table class="table table-sm table-borderless mb-0">
+                        <tbody>
+                            <tr>
+                                <td class="text-muted">Subtotal (Taxable / Stock Cost)</td>
+                                <td class="text-end text-nowrap">₹{{ format_paise(purchase.subtotal_paise) }}</td>
+                            </tr>
+                            {% if purchase.gst_type == 'intra_state' %}
+                                <tr>
+                                    <td class="text-muted">CGST</td>
+                                    <td class="text-end text-nowrap">₹{{ format_paise(purchase.cgst_paise) }}</td>
+                                </tr>
+                                <tr>
+                                    <td class="text-muted">SGST</td>
+                                    <td class="text-end text-nowrap">₹{{ format_paise(purchase.sgst_paise) }}</td>
+                                </tr>
+                            {% elif purchase.gst_type == 'inter_state' %}
+                                <tr>
+                                    <td class="text-muted">IGST</td>
+                                    <td class="text-end text-nowrap">₹{{ format_paise(purchase.igst_paise) }}</td>
+                                </tr>
+                            {% endif %}
+                            <tr class="border-top fw-semibold">
+                                <td>Grand Total</td>
+                                <td class="text-end text-nowrap">₹{{ format_paise(purchase.total_paise) }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="text-muted small text-end mt-1">
+                        Inventory WAC capitalizes taxable value only (excluding GST).
+                    </div>
+                </div>
+            </div>
+        {% endif %}
+
+        {% if can_write_purchases and purchase.status == 'draft' %}
+            <hr class="my-3">
+            <h2 class="h6 mb-2">Add Line Item</h2>
+            {% if line_errors.get('form') %}
+                <div class="alert alert-danger py-2 small">{{ line_errors['form'] }}</div>
+            {% endif %}
+            <form
+                method="post"
+                action="{{ url_for('purchases.add_purchase_item', purchase_id=purchase.id) }}"
+                class="row g-2 align-items-start"
+                novalidate
+            >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                <div class="col-12 col-lg-4">
+                    <label for="item_id" class="form-label small mb-1">Item *</label>
+                    <select
+                        id="item_id"
+                        name="item_id"
+                        class="form-select form-select-sm {% if line_errors.get('item_id') %}is-invalid{% endif %}"
+                    >
+                        <option value="">-- Select Active Item --</option>
+                        {% for item in available_items %}
+                            <option
+                                value="{{ item.id }}"
+                                {% if line_values.item_id == (item.id|string) %}selected{% endif %}
+                            >
+                                {{ item.name }} ({{ item.sku }}) — {{ item_type_labels.get(item.item_type, item.item_type) }}
+                                [stock: {{ item.stock_unit.code }}{% if can_view_valuation %}, GST {{ format_bps(item.gst_rate_bps) }}%{% endif %}]
+                            </option>
+                        {% endfor %}
+                    </select>
+                    {% if line_errors.get('item_id') %}
+                        <div class="invalid-feedback">{{ line_errors['item_id'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-6 col-md-3 col-lg-2">
+                    <label for="entered_qty" class="form-label small mb-1">Quantity *</label>
+                    <input
+                        type="text"
+                        id="entered_qty"
+                        name="entered_qty"
+                        value="{{ line_values.entered_qty }}"
+                        inputmode="decimal"
+                        placeholder="e.g. 50"
+                        class="form-control form-control-sm {% if line_errors.get('entered_qty') %}is-invalid{% endif %}"
+                    >
+                    {% if line_errors.get('entered_qty') %}
+                        <div class="invalid-feedback">{{ line_errors['entered_qty'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-6 col-md-3 col-lg-2">
+                    <label for="entered_unit_id" class="form-label small mb-1">Unit</label>
+                    <select
+                        id="entered_unit_id"
+                        name="entered_unit_id"
+                        class="form-select form-select-sm {% if line_errors.get('entered_unit_id') %}is-invalid{% endif %}"
+                    >
+                        <option value="">Item's Stock Unit</option>
+                        {% for unit in all_units %}
+                            <option
+                                value="{{ unit.id }}"
+                                {% if line_values.entered_unit_id == (unit.id|string) %}selected{% endif %}
+                            >
+                                {{ unit.code }} ({{ unit.dimension }})
+                            </option>
+                        {% endfor %}
+                    </select>
+                    {% if line_errors.get('entered_unit_id') %}
+                        <div class="invalid-feedback">{{ line_errors['entered_unit_id'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-6 col-md-3 col-lg-2">
+                    <label for="unit_rate" class="form-label small mb-1">Rate / Unit (₹) *</label>
+                    <input
+                        type="text"
+                        id="unit_rate"
+                        name="unit_rate"
+                        value="{{ line_values.unit_rate }}"
+                        inputmode="decimal"
+                        placeholder="e.g. 42.00"
+                        class="form-control form-control-sm {% if line_errors.get('unit_rate') %}is-invalid{% endif %}"
+                    >
+                    {% if line_errors.get('unit_rate') %}
+                        <div class="invalid-feedback">{{ line_errors['unit_rate'] }}</div>
+                    {% endif %}
+                </div>
+
+                {% if purchase.gst_type != 'none' %}
+                    <div class="col-6 col-md-3 col-lg-1">
+                        <label for="gst_rate" class="form-label small mb-1">GST %</label>
+                        <input
+                            type="text"
+                            id="gst_rate"
+                            name="gst_rate"
+                            value="{{ line_values.gst_rate }}"
+                            inputmode="decimal"
+                            placeholder="Item"
+                            class="form-control form-control-sm {% if line_errors.get('gst_rate') %}is-invalid{% endif %}"
+                        >
+                        {% if line_errors.get('gst_rate') %}
+                            <div class="invalid-feedback">{{ line_errors['gst_rate'] }}</div>
+                        {% endif %}
+                    </div>
+                {% endif %}
+
+                <div class="col-12 col-lg-{{ '1' if purchase.gst_type != 'none' else '2' }} d-grid">
+                    <label class="form-label small mb-1 d-none d-lg-block">&nbsp;</label>
+                    <button type="submit" class="btn btn-primary btn-sm">Add</button>
+                </div>
+            </form>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <span class="fw-semibold">Linked Stock Ledger Entries</span>
+        <span class="text-muted small">{{ ledger_entries|length }} {{ 'entry' if ledger_entries|length == 1 else 'entries' }}</span>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>ID</th>
+                    <th>Date</th>
+                    <th>Item</th>
+                    <th>Movement</th>
+                    <th class="text-end">Qty Change</th>
+                    {% if can_view_valuation %}
+                        <th class="text-end">Unit Cost (₹)</th>
+                        <th class="text-end">Value Change (₹)</th>
+                    {% endif %}
+                    <th>Recorded By</th>
+                    <th>Notes</th>
+                    <th class="text-end">Ledger</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in ledger_entries %}
+                    <tr>
+                        <td class="text-muted small">#{{ entry.id }}</td>
+                        <td class="text-nowrap">{{ entry.movement_date.isoformat() }}</td>
+                        <td>
+                            <a
+                                href="{{ url_for('master_data.view_item', item_id=entry.item.id) }}"
+                                class="text-decoration-none fw-semibold"
+                            >
+                                {{ entry.item.name }}
+                            </a>
+                            <div class="text-muted small">{{ entry.item.sku }}</div>
+                        </td>
+                        <td>
+                            <span class="badge {{ 'text-bg-success' if entry.qty_change_milli > 0 else 'text-bg-danger' }}">
+                                {{ movement_type_labels.get(entry.movement_type, entry.movement_type) }}
+                            </span>
+                            {% if entry.reverses_ledger_id %}
+                                <div class="text-muted small">Reverses #{{ entry.reverses_ledger_id }}</div>
+                            {% endif %}
+                        </td>
+                        <td class="text-end text-nowrap fw-semibold {{ 'text-success' if entry.qty_change_milli > 0 else 'text-danger' }}">
+                            {{ '+' if entry.qty_change_milli > 0 else '' }}{{ format_milli(entry.qty_change_milli) }}
+                            {{ entry.item.stock_unit.code }}
+                        </td>
+                        {% if can_view_valuation %}
+                            <td class="text-end text-nowrap">₹{{ format_paise(entry.unit_cost_paise) }}</td>
+                            <td class="text-end text-nowrap">
+                                {{ '+' if entry.value_change_paise > 0 else '' }}₹{{ format_paise(entry.value_change_paise) }}
+                            </td>
+                        {% endif %}
+                        <td class="small">{{ entry.creator.full_name if entry.creator else '—' }}</td>
+                        <td class="small text-muted">{{ entry.notes or '—' }}</td>
+                        <td class="text-end text-nowrap">
+                            <a
+                                href="{{ url_for('inventory.stock_ledger', item_id=entry.item.id) }}"
+                                class="btn btn-outline-secondary btn-sm"
+                            >
+                                Item Ledger
+                            </a>
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="{{ 10 if can_view_valuation else 8 }}" class="text-center text-muted py-3">
+                            {% if purchase.status == 'draft' %}
+                                No stock ledger entries yet. Entries are created when this purchase is posted.
+                            {% else %}
+                                No stock ledger entries linked to this purchase.
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-header bg-white fw-semibold">Audit Trail</div>
+    <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Timestamp (UTC)</th>
+                    <th>Action</th>
+                    <th>Actor</th>
+                    <th>Summary</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in audit_logs %}
+                    <tr>
+                        <td class="text-nowrap small text-muted">{{ log.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                        <td class="text-nowrap">
+                            <span class="badge text-bg-light border text-dark">
+                                {{ audit_action_labels.get(log.action, log.action) }}
+                            </span>
+                        </td>
+                        <td class="small text-nowrap">{{ log.user.full_name if log.user else '—' }}</td>
+                        <td class="small">{{ log.summary }}</td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="4" class="text-center text-muted py-3">No audit entries recorded.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% if can_write_purchases and purchase.status == 'draft' and line_rows %}
+    <div
+        class="modal fade"
+        id="postPurchaseModal"
+        tabindex="-1"
+        aria-labelledby="postPurchaseModalLabel"
+        aria-hidden="true"
+    >
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 class="modal-title fs-5" id="postPurchaseModalLabel">
+                        Confirm Purchase Posting
+                    </h2>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="mb-2">
+                        Are you sure you want to post <strong>{{ purchase.purchase_number }}</strong>?
+                    </p>
+                    <ul class="small text-muted mb-3">
+                        <li>Supplier: <strong>{{ purchase.supplier.name }}</strong></li>
+                        <li>Purchase Date: <strong>{{ purchase.purchase_date.isoformat() }}</strong></li>
+                        <li>Line Items: <strong>{{ line_rows|length }}</strong></li>
+                        {% if can_view_valuation %}
+                            <li>Capitalized Stock Value (Subtotal): <strong>₹{{ format_paise(purchase.subtotal_paise) }}</strong></li>
+                            <li>Grand Total (incl. GST): <strong>₹{{ format_paise(purchase.total_paise) }}</strong></li>
+                        {% endif %}
+                    </ul>
+                    <div class="alert alert-warning small mb-0">
+                        Posting permanently locks this purchase from editing and appends immutable
+                        <strong>Purchase Receipt</strong> entries to the stock ledger.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">
+                        Cancel
+                    </button>
+                    <form
+                        method="post"
+                        action="{{ url_for('purchases.post_purchase_action', purchase_id=purchase.id) }}"
+                        class="m-0"
+                    >
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-success btn-sm">
+                            Confirm &amp; Post Purchase
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endif %}
+{% endblock %}
