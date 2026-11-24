@@ -148,6 +148,44 @@ SQLITE_TRIGGER_STATEMENTS = [
         );
     END
     """,
+    # --- Stock ledger non-negative chronological running balance protection ---
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_stock_ledger_no_negative_balance
+    AFTER INSERT ON stock_ledger
+    BEGIN
+        SELECT RAISE(ABORT, 'Stock ledger movement would result in negative inventory quantity')
+        WHERE EXISTS (
+            SELECT 1
+            FROM (
+                SELECT
+                    SUM(qty_change_milli) OVER (
+                        PARTITION BY item_id
+                        ORDER BY movement_date ASC, id ASC
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS running_qty
+                FROM stock_ledger
+                WHERE item_id = NEW.item_id
+            )
+            WHERE running_qty < 0
+        );
+
+        SELECT RAISE(ABORT, 'Stock ledger movement would result in negative inventory value')
+        WHERE EXISTS (
+            SELECT 1
+            FROM (
+                SELECT
+                    SUM(value_change_paise) OVER (
+                        PARTITION BY item_id
+                        ORDER BY movement_date ASC, id ASC
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS running_value
+                FROM stock_ledger
+                WHERE item_id = NEW.item_id
+            )
+            WHERE running_value < 0
+        );
+    END
+    """,
     # --- Prevent deleting source documents referenced by stock_ledger ---
     """
     CREATE TRIGGER IF NOT EXISTS trg_stock_adjustments_no_delete_if_referenced

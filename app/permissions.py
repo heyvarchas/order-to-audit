@@ -29,6 +29,7 @@ CAP_MANAGE_PRODUCTS_CUSTOMERS = "manage_products_customers"
 CAP_RECORD_PURCHASES = "record_purchases"
 CAP_RECORD_PRODUCTION_RUNS = "record_production_runs"
 CAP_VIEW_INVENTORY = "view_inventory"
+CAP_MANAGE_STOCK_ADJUSTMENTS = "manage_stock_adjustments"
 CAP_MANAGE_INVOICES_DISPATCH = "manage_invoices_dispatch"
 CAP_RECORD_PAYMENTS = "record_payments"
 CAP_VIEW_FINANCIAL_REPORTS = "view_financial_reports"
@@ -43,6 +44,7 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     CAP_RECORD_PURCHASES,
     CAP_RECORD_PRODUCTION_RUNS,
     CAP_VIEW_INVENTORY,
+    CAP_MANAGE_STOCK_ADJUSTMENTS,
     CAP_MANAGE_INVOICES_DISPATCH,
     CAP_RECORD_PAYMENTS,
     CAP_VIEW_FINANCIAL_REPORTS,
@@ -69,6 +71,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             CAP_RECORD_PURCHASES,
             CAP_RECORD_PRODUCTION_RUNS,
             CAP_VIEW_INVENTORY,
+            CAP_MANAGE_STOCK_ADJUSTMENTS,
             CAP_MANAGE_INVOICES_DISPATCH,
             CAP_RECORD_PAYMENTS,
             CAP_VIEW_FINANCIAL_REPORTS,

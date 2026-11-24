@@ -71,6 +71,31 @@
                     <span class="badge text-bg-secondary">Inactive</span>
                 {% endif %}
             </dd>
+
+            <dt class="col-sm-4 col-md-3">On-Hand Stock</dt>
+            <dd class="col-sm-8 col-md-9">
+                <strong>{{ format_milli(stock_position.qty_milli) }} {{ item.stock_unit.code }}</strong>
+                <a
+                    href="{{ url_for('inventory.stock_ledger', item_id=item.id) }}"
+                    class="btn btn-outline-secondary btn-sm ms-2"
+                >
+                    View Ledger
+                </a>
+            </dd>
+
+            {% if can_view_valuation %}
+                <dt class="col-sm-4 col-md-3">Current WAC</dt>
+                <dd class="col-sm-8 col-md-9">
+                    {% if stock_position.wac_rupees is not none %}
+                        ₹{{ format_exact_rupees(stock_position.wac_rupees) }} / {{ item.stock_unit.code }}
+                    {% else %}
+                        —
+                    {% endif %}
+                </dd>
+
+                <dt class="col-sm-4 col-md-3">Inventory Value</dt>
+                <dd class="col-sm-8 col-md-9">₹{{ format_paise(stock_position.value_paise) }}</dd>
+            {% endif %}
         </dl>
     </div>
 </div>

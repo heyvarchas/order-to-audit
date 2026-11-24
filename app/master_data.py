@@ -1,6 +1,6 @@
 """Master Data blueprint: Items, Customers, Suppliers, Units, and Item-Unit Conversions."""
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import re
 
 from flask import Blueprint, abort, flash, redirect, render_template, request, url_for
@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from app.audit import log_audit
 from app.csrf import require_csrf_token
 from app.extensions import db
+from app.inventory_service import get_item_stock_position, item_has_ledger_history
 from app.models import (
     BOM,
     BOMItem,
@@ -21,13 +22,21 @@ from app.models import (
     Supplier,
     Unit,
 )
+from app.money import (
+    format_exact_rupees,
+    format_paise_as_rupees,
+    parse_rupees_to_paise,
+    parse_scaled_decimal,
+)
 from app.permissions import (
     CAP_MANAGE_PRODUCTS_CUSTOMERS,
     CAP_RECORD_PURCHASES,
+    CAP_VIEW_FINANCIAL_REPORTS,
     CAP_VIEW_INVENTORY,
     CAP_VIEW_OWN_SALES_ORDERS,
     roles_required,
     roles_with_permission,
+    user_has_permission,
 )
 from app.units import (
     UnitConversionError,
@@ -132,14 +141,6 @@ def format_bps_as_percent(bps: int | None) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def format_paise_as_rupees(paise: int | None) -> str:
-    """Format integer paise as rupees with 2 decimal places (e.g. 5000 -> '50.00')."""
-    if paise is None:
-        return ""
-    value = Decimal(paise) / Decimal(100)
-    return f"{value:.2f}"
-
-
 def _parse_scaled_decimal(
     raw: str,
     *,
@@ -147,26 +148,13 @@ def _parse_scaled_decimal(
     min_value: Decimal = Decimal("0"),
     max_value: Decimal | None = None,
 ) -> tuple[int | None, str | None]:
-    """Parse a non-negative decimal with at most 2 fractional digits into integer * 100."""
-    try:
-        dec = Decimal(raw)
-    except InvalidOperation:
-        return None, f"{field_label} must be a valid number."
-
-    if not dec.is_finite():
-        return None, f"{field_label} must be a valid number."
-
-    if dec < min_value:
-        return None, f"{field_label} must be at least {min_value}."
-
-    if max_value is not None and dec > max_value:
-        return None, f"{field_label} must not exceed {max_value}."
-
-    scaled = dec * Decimal(100)
-    if scaled != scaled.to_integral_value():
-        return None, f"{field_label} supports at most 2 decimal places."
-
-    return int(scaled), None
+    """Delegate scaled decimal parsing to shared `app.money.parse_scaled_decimal`."""
+    return parse_scaled_decimal(
+        raw,
+        field_label=field_label,
+        min_value=min_value,
+        max_value=max_value,
+    )
 
 
 def _validate_gstin(raw: str) -> tuple[str | None, str | None]:
@@ -279,7 +267,13 @@ def _validate_item_form(form, *, existing_item: Item | None = None):
         if stock_unit is None:
             errors["stock_unit_id"] = "Select a valid base stock unit."
         elif existing_item is not None and stock_unit.id != existing_item.stock_unit_id:
-            if existing_item.unit_conversions:
+            if item_has_ledger_history(existing_item.id):
+                errors["stock_unit_id"] = (
+                    "Cannot change base stock unit because this item already has "
+                    "stock ledger history."
+                )
+
+            if "stock_unit_id" not in errors and existing_item.unit_conversions:
                 existing_dims = {c.from_unit.dimension for c in existing_item.unit_conversions}
                 if stock_unit.dimension not in existing_dims:
                     errors["stock_unit_id"] = (
@@ -342,10 +336,10 @@ def _validate_item_form(form, *, existing_item: Item | None = None):
 
     default_sale_price_paise = None
     if sale_price_raw != "":
-        parsed_price, price_err = _parse_scaled_decimal(
+        parsed_price, price_err = parse_rupees_to_paise(
             sale_price_raw,
             field_label="Default sale price",
-            min_value=Decimal("0"),
+            allow_zero=True,
         )
         if price_err:
             errors["default_sale_price"] = price_err
@@ -811,10 +805,15 @@ def view_item(item_id: int):
         else []
     )
 
+    stock_position = get_item_stock_position(item.id)
+    can_view_valuation = user_has_permission(current_user, CAP_VIEW_FINANCIAL_REPORTS)
+
     return render_template(
         "master_data/item_detail.html",
         item=item,
         item_boms=item_boms,
+        stock_position=stock_position,
+        can_view_valuation=can_view_valuation,
         item_type_labels=ITEM_TYPE_LABELS,
         dimension_labels=UNIT_DIMENSION_LABELS,
         compatible_units=compatible_units,
@@ -823,6 +822,7 @@ def view_item(item_id: int):
         conversion_errors={},
         format_bps=format_bps_as_percent,
         format_paise=format_paise_as_rupees,
+        format_exact_rupees=format_exact_rupees,
         format_milli=format_milli,
     )
 
@@ -960,10 +960,15 @@ def add_item_conversion(item_id: int):
         else []
     )
 
+    stock_position = get_item_stock_position(item.id)
+    can_view_valuation = user_has_permission(current_user, CAP_VIEW_FINANCIAL_REPORTS)
+
     return render_template(
         "master_data/item_detail.html",
         item=item,
         item_boms=item_boms,
+        stock_position=stock_position,
+        can_view_valuation=can_view_valuation,
         item_type_labels=ITEM_TYPE_LABELS,
         dimension_labels=UNIT_DIMENSION_LABELS,
         compatible_units=compatible_units,
@@ -972,6 +977,7 @@ def add_item_conversion(item_id: int):
         conversion_errors=errors,
         format_bps=format_bps_as_percent,
         format_paise=format_paise_as_rupees,
+        format_exact_rupees=format_exact_rupees,
         format_milli=format_milli,
     )
 

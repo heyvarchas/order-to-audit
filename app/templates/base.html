@@ -49,6 +49,11 @@
                                 <a class="nav-link" href="{{ url_for('master_data.list_units') }}">Units</a>
                             </li>
                         {% endif %}
+                        {% if user_has_permission(current_user, 'view_inventory') %}
+                            <li class="nav-item">
+                                <a class="nav-link" href="{{ url_for('inventory.stock_summary') }}">Inventory</a>
+                            </li>
+                        {% endif %}
                         {% if user_has_permission(current_user, 'manage_products_customers', 'record_production_runs', 'view_financial_reports') %}
                             <li class="nav-item">
                                 <a class="nav-link" href="{{ url_for('boms.list_boms') }}">BOMs</a>

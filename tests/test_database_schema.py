@@ -67,6 +67,7 @@ EXPECTED_TRIGGERS = {
     "trg_stock_ledger_no_delete",
     "trg_stock_ledger_validate_source_doc",
     "trg_stock_ledger_validate_reversal",
+    "trg_stock_ledger_no_negative_balance",
     "trg_stock_adjustments_no_delete_if_referenced",
     "trg_purchases_no_delete_if_referenced",
     "trg_production_runs_no_delete_if_referenced",
@@ -420,7 +421,28 @@ def test_ledger_prevents_duplicate_production_issue_but_allows_used_plus_damaged
         planned_output_milli=200000,
         created_by=data["user"].id,
     )
-    db_session.add(run)
+    opening_adj = StockAdjustment(
+        adjustment_number="ADJ-POUCH-OPEN",
+        adjustment_type="opening_stock",
+        adjustment_date=date(2026, 11, 23),
+        reason="Opening pouch stock",
+        created_by=data["user"].id,
+    )
+    db_session.add_all([run, opening_adj])
+    db_session.flush()
+
+    opening_entry = StockLedger(
+        item_id=data["pouch"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="opening_stock",
+        source_doc_type="stock_adjustment",
+        source_doc_id=opening_adj.id,
+        qty_change_milli=500000,
+        unit_cost_paise=250,
+        value_change_paise=125000,
+        created_by=data["user"].id,
+    )
+    db_session.add(opening_entry)
     db_session.commit()
 
     # 188 used + 6 damaged as two disjoint ledger entries must succeed.
@@ -696,7 +718,14 @@ def test_ledger_reversal_must_exactly_negate_and_match_direction(db_session):
         db_session.commit()
     db_session.rollback()
 
-    # Exact reversal_in on a negative outward movement also succeeds
+    # Exact reversal_in on a negative outward movement also succeeds (seed stock first)
+    seed_adj = StockAdjustment(
+        adjustment_number="ADJ-OPEN-SEED",
+        adjustment_type="opening_stock",
+        adjustment_date=date(2026, 11, 23),
+        reason="Seed stock for outward test",
+        created_by=data["user"].id,
+    )
     adj = StockAdjustment(
         adjustment_number="ADJ-OUT-01",
         adjustment_type="spoilage_writeoff",
@@ -704,7 +733,20 @@ def test_ledger_reversal_must_exactly_negate_and_match_direction(db_session):
         reason="Test writeoff",
         created_by=data["user"].id,
     )
-    db_session.add(adj)
+    db_session.add_all([seed_adj, adj])
+    db_session.flush()
+    seed_in = StockLedger(
+        item_id=data["flour"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="opening_stock",
+        source_doc_type="stock_adjustment",
+        source_doc_id=seed_adj.id,
+        qty_change_milli=10000,
+        unit_cost_paise=4500,
+        value_change_paise=45000,
+        created_by=data["user"].id,
+    )
+    db_session.add(seed_in)
     db_session.flush()
     out_entry = StockLedger(
         item_id=data["flour"].id,
@@ -1034,3 +1076,104 @@ def test_purchase_optional_gst_defaults_to_zero(db_session):
     assert item.cgst_paise == 0
     assert item.sgst_paise == 0
     assert item.igst_paise == 0
+
+
+def test_ledger_trigger_rejects_negative_quantity_and_value(db_session):
+    data = _make_base_records(db_session)
+    adj_in = StockAdjustment(
+        adjustment_number="ADJ-NEG-OPEN",
+        adjustment_type="opening_stock",
+        adjustment_date=date(2026, 11, 23),
+        reason="Opening flour",
+        created_by=data["user"].id,
+    )
+    adj_out = StockAdjustment(
+        adjustment_number="ADJ-NEG-OUT",
+        adjustment_type="spoilage_writeoff",
+        adjustment_date=date(2026, 11, 23),
+        reason="Excess writeoff",
+        created_by=data["user"].id,
+    )
+    db_session.add_all([adj_in, adj_out])
+    db_session.flush()
+
+    inward = StockLedger(
+        item_id=data["flour"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="opening_stock",
+        source_doc_type="stock_adjustment",
+        source_doc_id=adj_in.id,
+        qty_change_milli=10000,
+        unit_cost_paise=4200,
+        value_change_paise=42000,
+        created_by=data["user"].id,
+    )
+    db_session.add(inward)
+    db_session.commit()
+
+    # Outward quantity exceeding on-hand balance must abort via trigger.
+    bad_qty = StockLedger(
+        item_id=data["flour"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="adjustment_out",
+        source_doc_type="stock_adjustment",
+        source_doc_id=adj_out.id,
+        qty_change_milli=-11000,
+        unit_cost_paise=4200,
+        value_change_paise=-42000,
+        created_by=data["user"].id,
+    )
+    db_session.add(bad_qty)
+    with pytest.raises(IntegrityError, match="negative inventory quantity"):
+        db_session.commit()
+    db_session.rollback()
+
+    # Outward value exceeding on-hand value must abort via trigger.
+    bad_val = StockLedger(
+        item_id=data["flour"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="adjustment_out",
+        source_doc_type="stock_adjustment",
+        source_doc_id=adj_out.id,
+        qty_change_milli=-5000,
+        unit_cost_paise=9000,
+        value_change_paise=-45000,
+        created_by=data["user"].id,
+    )
+    db_session.add(bad_val)
+    with pytest.raises(IntegrityError, match="negative inventory value"):
+        db_session.commit()
+    db_session.rollback()
+
+    # Exact depletion to zero qty and zero value is allowed.
+    exact_out = StockLedger(
+        item_id=data["flour"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="adjustment_out",
+        source_doc_type="stock_adjustment",
+        source_doc_id=adj_out.id,
+        qty_change_milli=-10000,
+        unit_cost_paise=4200,
+        value_change_paise=-42000,
+        created_by=data["user"].id,
+    )
+    db_session.add(exact_out)
+    db_session.commit()
+
+    # Reversing original inward after depletion would produce negative stock -> rejected.
+    bad_rev = StockLedger(
+        item_id=data["flour"].id,
+        movement_date=date(2026, 11, 23),
+        movement_type="reversal_out",
+        source_doc_type="stock_adjustment",
+        source_doc_id=adj_in.id,
+        reverses_ledger_id=inward.id,
+        qty_change_milli=-10000,
+        unit_cost_paise=4200,
+        value_change_paise=-42000,
+        created_by=data["user"].id,
+    )
+    db_session.add(bad_rev)
+    with pytest.raises(IntegrityError, match="negative inventory quantity"):
+        db_session.commit()
+    db_session.rollback()

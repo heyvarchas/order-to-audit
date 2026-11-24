@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% block title %}Record Opening Stock | Inventory | Order-to-Audit{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h3 mb-0">Record Opening Stock</h1>
+    <a href="{{ url_for('inventory.stock_summary') }}" class="btn btn-outline-secondary btn-sm">
+        Back to Stock Summary
+    </a>
+</div>
+
+<div class="alert alert-info small">
+    Opening stock can be recorded <strong>once per active item</strong> before any other stock movement
+    exists. Corrections after posting must use a ledger reversal and stock adjustment.
+</div>
+
+{% if errors.get('form') %}
+    <div class="alert alert-danger">{{ errors['form'] }}</div>
+{% endif %}
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <form method="post" action="{{ url_for('inventory.opening_stock') }}" novalidate>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <div class="row g-3">
+                <div class="col-12 col-md-6">
+                    <label for="item_id" class="form-label">Item *</label>
+                    <select
+                        id="item_id"
+                        name="item_id"
+                        class="form-select {% if errors.get('item_id') %}is-invalid{% endif %}"
+                    >
+                        <option value="">-- Select Active Item --</option>
+                        {% for item in active_items %}
+                            <option
+                                value="{{ item.id }}"
+                                {% if values.item_id == (item.id|string) %}selected{% endif %}
+                            >
+                                {{ item.name }} ({{ item.sku }}) — {{ item_type_labels.get(item.item_type, item.item_type) }}
+                                [stock unit: {{ item.stock_unit.code }}]
+                                {% if item.id in items_with_history %}(already has ledger movements){% endif %}
+                            </option>
+                        {% endfor %}
+                    </select>
+                    {% if errors.get('item_id') %}
+                        <div class="invalid-feedback">{{ errors['item_id'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-6">
+                    <label for="movement_date" class="form-label">Opening Date *</label>
+                    <input
+                        type="date"
+                        id="movement_date"
+                        name="movement_date"
+                        value="{{ values.movement_date }}"
+                        class="form-control {% if errors.get('movement_date') %}is-invalid{% endif %}"
+                    >
+                    {% if errors.get('movement_date') %}
+                        <div class="invalid-feedback">{{ errors['movement_date'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-sm-6 col-md-4">
+                    <label for="quantity" class="form-label">Quantity *</label>
+                    <input
+                        type="text"
+                        id="quantity"
+                        name="quantity"
+                        value="{{ values.quantity }}"
+                        inputmode="decimal"
+                        placeholder="e.g. 100 or 5000"
+                        class="form-control {% if errors.get('quantity') %}is-invalid{% endif %}"
+                    >
+                    {% if errors.get('quantity') %}
+                        <div class="invalid-feedback">{{ errors['quantity'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-sm-6 col-md-4">
+                    <label for="input_unit_id" class="form-label">Entry Unit (Optional)</label>
+                    <select
+                        id="input_unit_id"
+                        name="input_unit_id"
+                        class="form-select {% if errors.get('input_unit_id') %}is-invalid{% endif %}"
+                    >
+                        <option value="">Item's Base Stock Unit</option>
+                        {% for unit in all_units %}
+                            <option
+                                value="{{ unit.id }}"
+                                {% if values.input_unit_id == (unit.id|string) %}selected{% endif %}
+                            >
+                                {{ unit.code }} — {{ unit.name }} ({{ unit.dimension }})
+                            </option>
+                        {% endfor %}
+                    </select>
+                    <div class="form-text">
+                        Leave blank to enter directly in the item's base stock unit, or select a convertible unit.
+                    </div>
+                    {% if errors.get('input_unit_id') %}
+                        <div class="invalid-feedback">{{ errors['input_unit_id'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-4">
+                    <label for="unit_cost" class="form-label">Unit Cost (₹ per stock unit) *</label>
+                    <input
+                        type="text"
+                        id="unit_cost"
+                        name="unit_cost"
+                        value="{{ values.unit_cost }}"
+                        inputmode="decimal"
+                        placeholder="e.g. 42.00 or 0"
+                        class="form-control {% if errors.get('unit_cost') %}is-invalid{% endif %}"
+                    >
+                    <div class="form-text">Zero (0) is allowed for zero-cost stock.</div>
+                    {% if errors.get('unit_cost') %}
+                        <div class="invalid-feedback">{{ errors['unit_cost'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-6">
+                    <label for="reason" class="form-label">Reason *</label>
+                    <input
+                        type="text"
+                        id="reason"
+                        name="reason"
+                        value="{{ values.reason }}"
+                        class="form-control {% if errors.get('reason') %}is-invalid{% endif %}"
+                    >
+                    {% if errors.get('reason') %}
+                        <div class="invalid-feedback">{{ errors['reason'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-6">
+                    <label for="notes" class="form-label">Notes (Optional)</label>
+                    <input
+                        type="text"
+                        id="notes"
+                        name="notes"
+                        value="{{ values.notes }}"
+                        class="form-control"
+                    >
+                </div>
+            </div>
+
+            <div class="mt-4 d-flex gap-2">
+                <button type="submit" class="btn btn-primary">Record Opening Stock</button>
+                <a href="{{ url_for('inventory.stock_summary') }}" class="btn btn-outline-secondary">Cancel</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
