@@ -12,6 +12,9 @@ from sqlalchemy import CheckConstraint, Index, UniqueConstraint, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.extensions import db
+from app.permissions import VALID_ROLES
+
+_USER_ROLES_SQL = ", ".join(f"'{role}'" for role in VALID_ROLES)
 
 
 def utcnow():
@@ -28,7 +31,7 @@ class User(UserMixin, db.Model):
     __tablename__ = "users"
     __table_args__ = (
         CheckConstraint(
-            "role IN ('salesman', 'admin', 'production_supervisor', 'accountant', 'owner')",
+            f"role IN ({_USER_ROLES_SQL})",
             name="ck_users_role",
         ),
     )

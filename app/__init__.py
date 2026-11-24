@@ -34,6 +34,10 @@ def create_app(config_class=DevelopmentConfig):
     # Register explicit CLI commands without initializing the DB on startup.
     register_cli_commands(app)
 
+    @app.errorhandler(403)
+    def forbidden(_error):
+        return render_template("errors/403.html"), 403
+
     @app.route("/")
     @login_required
     def home():
