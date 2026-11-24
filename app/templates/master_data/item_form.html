@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block title %}{{ 'Edit Item' if mode == 'edit' else 'New Item' }} | Order-to-Audit{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h3 mb-0">{{ 'Edit Item' if mode == 'edit' else 'New Item' }}</h1>
+    <a href="{{ url_for('master_data.list_items') }}" class="btn btn-outline-secondary btn-sm">
+        Back to Items
+    </a>
+</div>
+
+{% if not units %}
+    <div class="alert alert-warning">
+        No units exist yet.
+        <a href="{{ url_for('master_data.create_unit') }}" class="alert-link">Create a unit first</a>
+        before adding an item.
+    </div>
+{% endif %}
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <form method="post" novalidate>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <div class="row g-3">
+                <div class="col-12 col-md-4">
+                    <label for="sku" class="form-label">SKU / Item Code *</label>
+                    <input
+                        type="text"
+                        id="sku"
+                        name="sku"
+                        value="{{ values.sku }}"
+                        maxlength="50"
+                        class="form-control {% if errors.get('sku') %}is-invalid{% endif %}"
+                        required
+                    >
+                    {% if errors.get('sku') %}
+                        <div class="invalid-feedback">{{ errors['sku'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-8">
+                    <label for="name" class="form-label">Item Name *</label>
+                    <input
+                        type="text"
+                        id="name"
+                        name="name"
+                        value="{{ values.name }}"
+                        maxlength="150"
+                        class="form-control {% if errors.get('name') %}is-invalid{% endif %}"
+                        required
+                    >
+                    {% if errors.get('name') %}
+                        <div class="invalid-feedback">{{ errors['name'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-6">
+                    <label for="item_type" class="form-label">Item Type *</label>
+                    <select
+                        id="item_type"
+                        name="item_type"
+                        class="form-select {% if errors.get('item_type') %}is-invalid{% endif %}"
+                        required
+                    >
+                        <option value="">-- Select Type --</option>
+                        {% for code, label in item_types %}
+                            <option value="{{ code }}" {% if values.item_type == code %}selected{% endif %}>
+                                {{ label }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                    {% if errors.get('item_type') %}
+                        <div class="invalid-feedback">{{ errors['item_type'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-6">
+                    <label for="stock_unit_id" class="form-label">Base Stock Unit *</label>
+                    <select
+                        id="stock_unit_id"
+                        name="stock_unit_id"
+                        class="form-select {% if errors.get('stock_unit_id') %}is-invalid{% endif %}"
+                        required
+                    >
+                        <option value="">-- Select Stock Unit --</option>
+                        {% for unit in units %}
+                            <option
+                                value="{{ unit.id }}"
+                                {% if values.stock_unit_id == (unit.id|string) %}selected{% endif %}
+                            >
+                                {{ unit.code }} — {{ unit.name }} ({{ unit.dimension }})
+                            </option>
+                        {% endfor %}
+                    </select>
+                    {% if errors.get('stock_unit_id') %}
+                        <div class="invalid-feedback">{{ errors['stock_unit_id'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-4">
+                    <label for="hsn_code" class="form-label">HSN Code</label>
+                    <input
+                        type="text"
+                        id="hsn_code"
+                        name="hsn_code"
+                        value="{{ values.hsn_code }}"
+                        maxlength="20"
+                        placeholder="e.g. 21069099"
+                        class="form-control {% if errors.get('hsn_code') %}is-invalid{% endif %}"
+                    >
+                    {% if errors.get('hsn_code') %}
+                        <div class="invalid-feedback">{{ errors['hsn_code'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-4">
+                    <label for="gst_rate" class="form-label">GST Rate (%) *</label>
+                    <input
+                        type="text"
+                        id="gst_rate"
+                        name="gst_rate"
+                        value="{{ values.gst_rate }}"
+                        inputmode="decimal"
+                        placeholder="0, 5, 12, 18"
+                        class="form-control {% if errors.get('gst_rate') %}is-invalid{% endif %}"
+                    >
+                    {% if errors.get('gst_rate') %}
+                        <div class="invalid-feedback">{{ errors['gst_rate'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-4">
+                    <label for="default_sale_price" class="form-label">Default Sale Price (₹)</label>
+                    <input
+                        type="text"
+                        id="default_sale_price"
+                        name="default_sale_price"
+                        value="{{ values.default_sale_price }}"
+                        inputmode="decimal"
+                        placeholder="Optional, e.g. 50.00"
+                        class="form-control {% if errors.get('default_sale_price') %}is-invalid{% endif %}"
+                    >
+                    {% if errors.get('default_sale_price') %}
+                        <div class="invalid-feedback">{{ errors['default_sale_price'] }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12">
+                    <div class="form-check">
+                        <input
+                            type="checkbox"
+                            id="is_active"
+                            name="is_active"
+                            value="1"
+                            class="form-check-input"
+                            {% if values.is_active %}checked{% endif %}
+                        >
+                        <label for="is_active" class="form-check-label">Active</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="d-flex flex-wrap gap-2 mt-4">
+                <button type="submit" class="btn btn-primary">
+                    {{ 'Save Changes' if mode == 'edit' else 'Create Item' }}
+                </button>
+                <a
+                    href="{{ url_for('master_data.view_item', item_id=item.id) if mode == 'edit' else url_for('master_data.list_items') }}"
+                    class="btn btn-outline-secondary"
+                >
+                    Cancel
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

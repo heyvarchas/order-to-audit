@@ -7,6 +7,8 @@ from app.auth import auth_bp
 from app.csrf import generate_csrf_token
 from app.db_init import register_cli_commands, register_sqlite_foreign_keys
 from app.extensions import db, login_manager
+from app.master_data import master_data_bp
+from app.permissions import user_has_permission
 from config import DevelopmentConfig
 
 
@@ -25,11 +27,13 @@ def create_app(config_class=DevelopmentConfig):
     db.init_app(app)
     login_manager.init_app(app)
 
-    # Make the CSRF token helper available in all Jinja templates.
+    # Make CSRF and permission helpers available in all Jinja templates.
     app.jinja_env.globals["csrf_token"] = generate_csrf_token
+    app.jinja_env.globals["user_has_permission"] = user_has_permission
 
     # Register blueprints.
     app.register_blueprint(auth_bp)
+    app.register_blueprint(master_data_bp)
 
     # Register explicit CLI commands without initializing the DB on startup.
     register_cli_commands(app)

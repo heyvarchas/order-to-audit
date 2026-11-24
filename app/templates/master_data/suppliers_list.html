@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}Suppliers | Order-to-Audit{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h3 mb-0">Suppliers</h1>
+    {% if user_has_permission(current_user, 'manage_products_customers') %}
+        <a href="{{ url_for('master_data.create_supplier') }}" class="btn btn-primary btn-sm">
+            + New Supplier
+        </a>
+    {% endif %}
+</div>
+
+<form method="get" class="card card-body shadow-sm mb-3">
+    <div class="row g-2 align-items-end">
+        <div class="col-12 col-sm-5 col-md-3">
+            <label for="status" class="form-label small mb-1">Status</label>
+            <select id="status" name="status" class="form-select form-select-sm">
+                <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All</option>
+                <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Active</option>
+                <option value="inactive" {% if status_filter == 'inactive' %}selected{% endif %}>Inactive</option>
+            </select>
+        </div>
+        <div class="col-12 col-sm-3 col-md-2">
+            <button type="submit" class="btn btn-outline-secondary btn-sm w-100">Filter</button>
+        </div>
+    </div>
+</form>
+
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Name</th>
+                    <th>State</th>
+                    <th>GSTIN</th>
+                    <th>Phone</th>
+                    <th>Status</th>
+                    <th class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for supplier in suppliers %}
+                    <tr>
+                        <td class="fw-semibold">
+                            <a href="{{ url_for('master_data.view_supplier', supplier_id=supplier.id) }}" class="text-decoration-none">
+                                {{ supplier.name }}
+                            </a>
+                        </td>
+                        <td>{{ supplier.state }}</td>
+                        <td>{{ supplier.gstin or 'Unregistered' }}</td>
+                        <td>{{ supplier.phone or '—' }}</td>
+                        <td>
+                            {% if supplier.is_active %}
+                                <span class="badge text-bg-success">Active</span>
+                            {% else %}
+                                <span class="badge text-bg-secondary">Inactive</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end text-nowrap">
+                            <a href="{{ url_for('master_data.view_supplier', supplier_id=supplier.id) }}" class="btn btn-outline-secondary btn-sm">
+                                View
+                            </a>
+                            {% if user_has_permission(current_user, 'manage_products_customers') %}
+                                <a href="{{ url_for('master_data.edit_supplier', supplier_id=supplier.id) }}" class="btn btn-outline-primary btn-sm">
+                                    Edit
+                                </a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="6" class="text-center text-muted py-4">No suppliers found.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

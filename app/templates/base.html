@@ -16,14 +16,49 @@
         <div class="container">
             <a class="navbar-brand" href="{{ url_for('home') }}">Order-to-Audit</a>
             {% if current_user.is_authenticated %}
-                <div class="d-flex align-items-center gap-3 ms-auto">
-                    <span class="navbar-text text-light small mb-0">
-                        Signed in as <strong>{{ current_user.full_name }}</strong>
-                    </span>
-                    <form method="post" action="{{ url_for('auth.logout') }}" class="m-0">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <button type="submit" class="btn btn-outline-light btn-sm">Log Out</button>
-                    </form>
+                <button
+                    class="navbar-toggler"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#mainNavbar"
+                    aria-controls="mainNavbar"
+                    aria-expanded="false"
+                    aria-label="Toggle navigation"
+                >
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="mainNavbar">
+                    <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                        {% if user_has_permission(current_user, 'view_inventory') %}
+                            <li class="nav-item">
+                                <a class="nav-link" href="{{ url_for('master_data.list_items') }}">Items</a>
+                            </li>
+                        {% endif %}
+                        {% if user_has_permission(current_user, 'manage_products_customers', 'view_own_sales_orders') %}
+                            <li class="nav-item">
+                                <a class="nav-link" href="{{ url_for('master_data.list_customers') }}">Customers</a>
+                            </li>
+                        {% endif %}
+                        {% if user_has_permission(current_user, 'manage_products_customers', 'record_purchases') %}
+                            <li class="nav-item">
+                                <a class="nav-link" href="{{ url_for('master_data.list_suppliers') }}">Suppliers</a>
+                            </li>
+                        {% endif %}
+                        {% if user_has_permission(current_user, 'view_inventory') %}
+                            <li class="nav-item">
+                                <a class="nav-link" href="{{ url_for('master_data.list_units') }}">Units</a>
+                            </li>
+                        {% endif %}
+                    </ul>
+                    <div class="d-flex flex-wrap align-items-center gap-3">
+                        <span class="navbar-text text-light small mb-0">
+                            Signed in as <strong>{{ current_user.full_name }}</strong>
+                        </span>
+                        <form method="post" action="{{ url_for('auth.logout') }}" class="m-0">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="btn btn-outline-light btn-sm">Log Out</button>
+                        </form>
+                    </div>
                 </div>
             {% endif %}
         </div>

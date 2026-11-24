@@ -104,6 +104,23 @@ def role_has_permission(role: object, capability: str) -> bool:
     return capability in ROLE_PERMISSIONS[role]
 
 
+def roles_with_permission(*capabilities: str) -> tuple[str, ...]:
+    """Return all valid roles granted at least one of the given capabilities."""
+    return tuple(
+        role
+        for role in VALID_ROLES
+        if any(capability in ROLE_PERMISSIONS[role] for capability in capabilities)
+    )
+
+
+def user_has_permission(user, *capabilities: str) -> bool:
+    """Return True if an authenticated user holds at least one given capability."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    user_role = getattr(user, "role", None)
+    return any(role_has_permission(user_role, cap) for cap in capabilities)
+
+
 def roles_required(*roles: str):
     """Restrict a route to authenticated users whose role is in ``roles``.
 
